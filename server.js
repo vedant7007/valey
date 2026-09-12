@@ -101,6 +101,21 @@ async function handleVoiceReply(request, response) {
         sendTwiML(response, continueTwiml(approved.speak));
         return;
       }
+
+      const approvalDecision = await getSpokenReply(speech, call);
+
+      if (!approvalDecision.action) {
+        const reply = "I do not have anything queued to execute.";
+        await appendCallTurn(callSid, redact(speech).clean, reply);
+        sendTwiML(response, continueTwiml(reply));
+        return;
+      }
+
+      const result = await executeCallAction(approvalDecision.action);
+      const reply = callActionResultSpeech(approvalDecision.action, result);
+      await appendCallTurn(callSid, redact(speech).clean, reply);
+      sendTwiML(response, continueTwiml(reply));
+      return;
     }
 
     if (call?.pendingAction) {
@@ -154,6 +169,9 @@ async function getSpokenReply(userSpeech, call) {
             "Do not read out email addresses or numbers longer than four digits.",
             "State what you can do and wait.",
             "Never execute an action without explicit approval.",
+            "You do not perform actions yourself. Request them with the action field, and the system will confirm afterwards.",
+            "Never say sent, done, created, or scheduled in the speak field.",
+            "When the user approves, return the action and let the system report the real result.",
             "Never invent details about the user's inbox or calendar that are not in the provided context."
           ].join("\n")
         },
@@ -185,7 +203,7 @@ async function executeApprovedCallAction(callSid, call) {
     await safeRecordResponse(existingApproval.decisionId, result.ok ? "approved" : "ignored");
     return {
       ok: result.ok,
-      speak: result.ok ? callActionSuccessSpeech(mapPendingApprovalAction(existingApproval.action), result) : "I tried, but that action failed."
+      speak: callActionResultSpeech(mapPendingApprovalAction(existingApproval.action), result)
     };
   }
 
@@ -197,7 +215,7 @@ async function executeApprovedCallAction(callSid, call) {
   await setCallPendingAction(callSid, null);
   return {
     ok: result.ok,
-    speak: result.ok ? callActionSuccessSpeech(call.pendingAction.action, result) : "I tried, but that action failed."
+    speak: callActionResultSpeech(call.pendingAction.action, result)
   };
 }
 
@@ -263,11 +281,17 @@ async function executeCallAction(action) {
 function parseConversationResult(content) {
   try {
     const parsed = JSON.parse(stripFences(content || ""));
-    return {
+    const result = {
       speak: safeSpokenText(parsed.speak || "I can help with that. What would you like me to do?"),
       action: normalizeCallAction(parsed.action)
     };
+    console.log(`Parsed call action: ${JSON.stringify(result.action)}`);
+    return {
+      ...result,
+      speak: correctCompletionClaim(result.speak, result.action)
+    };
   } catch {
+    console.log("Parsed call action: null");
     return { speak: "I heard you. Please say what you would like me to do next.", action: null };
   }
 }
@@ -421,6 +445,23 @@ function callActionSuccessSpeech(action, result) {
   }
 
   return `Approved. I ${pastTenseAction(action)}.`;
+}
+
+function callActionFailureSpeech(action, result) {
+  const reason = safeSpokenText(result?.error?.message || result?.error || "the adapter reported an error");
+  return `I could not ${describeCallAction(action)} because ${reason}.`;
+}
+
+function callActionResultSpeech(action, result) {
+  return result?.ok ? callActionSuccessSpeech(action, result) : callActionFailureSpeech(action, result);
+}
+
+function correctCompletionClaim(speak, action) {
+  if (action || !/\b(?:sent|done|created|scheduled)\b/i.test(speak)) {
+    return speak;
+  }
+
+  return "I do not have anything queued to execute.";
 }
 
 function naturalFreeSlots(slots) {
@@ -730,6 +771,10 @@ async function runSelfTest() {
   const actionParsePassed = parsedAction.speak === "I can draft that email for you." && parsedAction.action?.type === "draft_email";
   console.log(`${actionParsePassed ? "PASS" : "FAIL"} voice action json parsing`);
 
+  const falseSuccess = parseConversationResult("{\"speak\":\"Okay, message sent.\",\"action\":null}");
+  const falseSuccessPassed = falseSuccess.action === null && falseSuccess.speak === "I do not have anything queued to execute.";
+  console.log(`${falseSuccessPassed ? "PASS" : "FAIL"} voice false success correction`);
+
   const spokenSafetyPassed = safeCallBriefing({ briefing: "Payment OTP 123456 for card" }).includes("withheld") &&
     safeSpokenText("Email person@example.test and read 1234567890 now").includes("an email address") &&
     !safeSpokenText("Email person@example.test and read 1234567890 now").includes("1234567890");
@@ -775,7 +820,7 @@ async function runSelfTest() {
     unknown.ok === false && APPROVAL_CODE.test("A12") && !APPROVAL_CODE.test("A123") && !APPROVAL_CODE.test("");
   console.log(`${approvalPassed ? "PASS" : "FAIL"} approval endpoint guards`);
 
-  if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed) {
+  if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !falseSuccessPassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed) {
     process.exitCode = 1;
   }
 }
