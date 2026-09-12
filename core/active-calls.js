@@ -13,6 +13,7 @@ export async function recordActiveCall(callSid, briefing, context = {}) {
     briefing: String(briefing || ""),
     context,
     history: [],
+    exchangeCount: 0,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -41,6 +42,7 @@ export async function appendCallTurn(callSid, userText, assistantText) {
       at: new Date().toISOString()
     }
   ].slice(-MAX_HISTORY);
+  call.exchangeCount = (call.exchangeCount || 0) + 1;
   call.updatedAt = new Date().toISOString();
   await writeActiveCalls(calls);
   return call;
@@ -71,7 +73,7 @@ async function runSelfTest() {
   await recordActiveCall("CA_TEST", "Briefing text", { eventId: "event-1" });
   const call = await appendCallTurn("CA_TEST", "approve", "I can help with that.");
   const loaded = await getActiveCall("CA_TEST");
-  const passed = loaded?.briefing === "Briefing text" && call?.history?.length >= 1;
+  const passed = loaded?.briefing === "Briefing text" && call?.history?.length >= 1 && call?.exchangeCount >= 1;
 
   console.log(`${passed ? "PASS" : "FAIL"} active call store`);
 

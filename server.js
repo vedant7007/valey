@@ -8,7 +8,8 @@ import { appendCallTurn, getActiveCall } from "./core/active-calls.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_BRIEFING = "Valey found an urgent item that needs your attention.";
-const STOP_PATTERN = /\b(stop|goodbye)\b/i;
+const END_INTENT_PATTERN = /\b(?:bye|goodbye|end the call|hang up|that's all|thanks that's it|cut the call|stop|done)\b/i;
+const MAX_CALL_EXCHANGES = 5;
 const PUBLIC_DIR = fileURLToPath(new URL("./public/", import.meta.url));
 const STATE_DIR = path.resolve(process.env.VALEY_STATE_DIR || "state");
 const MAX_DASHBOARD_DECISIONS = 50;
@@ -59,17 +60,26 @@ async function handleVoiceReply(request, response) {
     const speech = String(form.get("SpeechResult") || "").trim();
     const callSid = form.get("CallSid");
 
-    if (!speech || STOP_PATTERN.test(speech)) {
+    if (!speech || END_INTENT_PATTERN.test(speech)) {
       sendTwiML(response, sayTwiml("Okay, goodbye."));
       return;
     }
 
-    const call = callSid ? await getActiveCall(callSid) : null;
+    if (!callSid) {
+      sendTwiML(response, sayTwiml("Sorry, I could not identify this call. Goodbye."));
+      return;
+    }
+
+    const call = await getActiveCall(callSid);
+
+    if ((call?.exchangeCount ?? call?.history?.length ?? 0) >= MAX_CALL_EXCHANGES) {
+      sendTwiML(response, sayTwiml("We have reached the conversation limit. Goodbye."));
+      return;
+    }
+
     const reply = await getSpokenReply(speech, call);
 
-    if (callSid) {
-      await appendCallTurn(callSid, speech, reply);
-    }
+    await appendCallTurn(callSid, speech, reply);
 
     sendTwiML(response, continueTwiml(reply));
   } catch (error) {
@@ -268,6 +278,22 @@ async function runSelfTest() {
   console.log(briefing);
   console.log(`${passed ? "PASS" : "FAIL"} voice server twiml`);
 
+  const endIntentPassed = [
+    "bye",
+    "Goodbye",
+    "please end the call",
+    "hang up now",
+    "that's all",
+    "thanks that's it",
+    "cut the call",
+    "stop",
+    "done"
+  ].every((text) => END_INTENT_PATTERN.test(text));
+  console.log(`${endIntentPassed ? "PASS" : "FAIL"} voice end intent matching`);
+
+  const capPassed = MAX_CALL_EXCHANGES === 5;
+  console.log(`${capPassed ? "PASS" : "FAIL"} voice exchange cap`);
+
   const state = summarize(
     [{ tier: "critical", channel: "call", source: "gmail", category: "financial", redactedText: "secret", response: "approved" }, null],
     { A1: { code: "A1", action: { type: "email_reply", summary: "Reply", payload: { to: "x" } }, expiresAt: new Date(Date.now() + 60000).toISOString() }, A2: { code: "A2", expiresAt: "2000-01-01T00:00:00.000Z" } }
@@ -277,7 +303,7 @@ async function runSelfTest() {
     state.decisions[0].redactedText === undefined && Array.isArray(summarize([], {}).decisions);
   console.log(`${statePassed ? "PASS" : "FAIL"} dashboard state`);
 
-  if (!passed || !statePassed) {
+  if (!passed || !endIntentPassed || !capPassed || !statePassed) {
     process.exitCode = 1;
   }
 }
