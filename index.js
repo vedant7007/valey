@@ -94,7 +94,7 @@ async function dispatchApprovalRequest(event, decision, approval) {
   const message = approvalText(decision, approval);
 
   if (decision.channel === "voice") {
-    const result = await sendVoice(voiceApprovalText(decision, approval));
+    const result = await sendVoice(buildVoiceSpokenText(decision, approval));
     logDispatchResult("voice approval", result);
     return result;
   }
@@ -135,7 +135,7 @@ async function dispatchNotification(decision) {
   }
 
   if (decision.channel === "voice") {
-    const result = await sendVoice(voiceNotificationText(decision));
+    const result = await sendVoice(buildVoiceSpokenText(decision));
     logDispatchResult("voice", result);
     return result;
   }
@@ -253,12 +253,12 @@ function notificationText(decision) {
   return `Valey ${decision.tier}: ${decision.reason}.${action}`;
 }
 
-function voiceNotificationText(decision) {
-  return `Valey says: ${decision.reason}`;
-}
+export function buildVoiceSpokenText(decision, approval = null) {
+  if (decision.proposedAction && approval) {
+    return `Valey says: ${decision.reason}. Proposed action: ${decision.proposedAction.summary}. Reply with code ${approval.code} to approve.`;
+  }
 
-function voiceApprovalText(decision, approval) {
-  return `Valey says: ${decision.reason}. Proposed action: ${decision.proposedAction.summary}. Reply with code ${approval.code} to approve.`;
+  return `Valey says: ${decision.reason}`;
 }
 
 function approvalText(decision, approval) {
@@ -308,7 +308,7 @@ async function runSelfTest() {
   const approval = await createPendingApproval(decision);
   const consumed = await consumePendingApproval(approval.code);
   const missed = await consumePendingApproval("A99");
-  const voiceText = voiceApprovalText({ ...decision, channel: "voice" }, approval);
+  const voiceText = buildVoiceSpokenText({ ...decision, channel: "voice" }, approval);
   const passed = consumed?.action?.type === "calendar_event" && missed === null && voiceText.includes(approval.code) && voiceText.includes(decision.reason) && voiceText.includes(decision.proposedAction.summary);
 
   console.log(`${passed ? "PASS" : "FAIL"} index approval gating`);
