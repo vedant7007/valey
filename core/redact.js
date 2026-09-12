@@ -8,7 +8,12 @@ const PLACEHOLDERS = {
   TOKEN: "[TOKEN]"
 };
 
-const FINANCIAL_TERMS = /\b(bank|banking|upi|payment|paid|paytm|gpay|phonepe|transaction|debit|credit|card|account|balance|otp|verification|verify|password|pin|security alert|fraud|withdrawal|deposit|transfer)\b/i;
+const MONEY_AMOUNT = /(?:\b(?:rs\.?|inr|\$|usd|rupees?|dollars?)\b\s*[\u20b9$]?\s*\d[\d,]*(?:\.\d{1,2})?|\u20b9\s*\d[\d,]*(?:\.\d{1,2})?|\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:rs\.?|inr|usd|rupees?|dollars?)\b)/i;
+const CARD_SEQUENCE = /\b(?:\d[ -]*?){13,19}\b/g;
+const MASKED_ACCOUNT = /\b(?:x{2,}|\*{2,})[-\s]?\d{4}\b/i;
+const OTP_OR_CODE = /\b(?:otp|code|verification|verify|password|pin)\b\D{0,20}\b\d{4,8}\b/i;
+const COMPLETED_TRANSACTION = /\b(?:debited|credited|transaction successful|payment received|payment successful|amount transferred|withdrawn)\b/i;
+const SECURITY_ALERT = /\b(?:security alert|password reset|login attempt|account locked|suspicious activity)\b/i;
 
 export function redact(text) {
   const found = new Set();
@@ -25,7 +30,15 @@ export function redact(text) {
 }
 
 export function isFinancial(text) {
-  return FINANCIAL_TERMS.test(String(text ?? ""));
+  const value = String(text ?? "");
+  CARD_SEQUENCE.lastIndex = 0;
+
+  return MONEY_AMOUNT.test(value) ||
+    Array.from(value.matchAll(CARD_SEQUENCE)).some(([match]) => isCardLike(match)) ||
+    MASKED_ACCOUNT.test(value) ||
+    OTP_OR_CODE.test(value) ||
+    COMPLETED_TRANSACTION.test(value) ||
+    SECURITY_ALERT.test(value);
 }
 
 function replace(input, pattern, type, found, guard = () => true) {
@@ -121,6 +134,36 @@ function runSelfTest() {
     {
       name: "financial detector",
       input: "Security alert: payment transaction needs OTP",
+      expectFinancial: true
+    },
+    {
+      name: "bill due reminder is ordinary",
+      input: "Your electricity bill payment is due this Tuesday",
+      expectFinancial: false
+    },
+    {
+      name: "rent due reminder is ordinary",
+      input: "Your rent is due on the 5th",
+      expectFinancial: false
+    },
+    {
+      name: "amount and masked account are financial",
+      input: "Rs 500 debited from your account xxxx4417",
+      expectFinancial: true
+    },
+    {
+      name: "otp is financial",
+      input: "Your OTP is 448120",
+      expectFinancial: true
+    },
+    {
+      name: "payment success is financial",
+      input: "Payment successful for order #221",
+      expectFinancial: true
+    },
+    {
+      name: "password reset is financial",
+      input: "Password reset requested for your account",
       expectFinancial: true
     }
   ];
