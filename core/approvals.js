@@ -42,6 +42,21 @@ export async function consumePendingApproval(code) {
   return approval;
 }
 
+export async function consumePendingApprovalForEvent(eventId) {
+  const pending = await readPending();
+  const cleaned = dropExpired(pending);
+  const match = Object.values(cleaned).find((approval) => approval.eventId === eventId);
+
+  if (!match) {
+    await writePending(cleaned);
+    return null;
+  }
+
+  delete cleaned[match.code];
+  await writePending(cleaned);
+  return match;
+}
+
 export async function expirePendingApprovals() {
   const pending = await readPending();
   const cleaned = dropExpired(pending);
@@ -101,7 +116,14 @@ async function runSelfTest() {
   });
   const consumed = await consumePendingApproval(approval.code.toLowerCase());
   const missed = await consumePendingApproval(approval.code);
-  const passed = consumed?.code === approval.code && missed === null;
+  const eventApproval = await createPendingApproval({
+    memoryId: "decision-2",
+    eventId: "gmail:msg-2",
+    channel: "call",
+    proposedAction: { type: "email_reply", summary: "Draft yes.", payload: {} }
+  });
+  const consumedByEvent = await consumePendingApprovalForEvent("gmail:msg-2");
+  const passed = consumed?.code === approval.code && missed === null && consumedByEvent?.code === eventApproval.code;
 
   console.log(`${passed ? "PASS" : "FAIL"} pending approval lifecycle`);
 

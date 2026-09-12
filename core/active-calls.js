@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const STATE_DIR = path.resolve(process.env.VALEY_STATE_DIR || "state");
 const ACTIVE_CALLS_FILE = path.join(STATE_DIR, "active-calls.json");
-const MAX_HISTORY = 12;
+const MAX_HISTORY = 10;
 
 export async function recordActiveCall(callSid, briefing, context = {}) {
   const calls = await readActiveCalls();
@@ -14,6 +14,7 @@ export async function recordActiveCall(callSid, briefing, context = {}) {
     context,
     history: [],
     exchangeCount: 0,
+    pendingAction: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -48,6 +49,24 @@ export async function appendCallTurn(callSid, userText, assistantText) {
   return call;
 }
 
+export async function setCallPendingAction(callSid, pendingAction) {
+  const calls = await readActiveCalls();
+  const call = calls[String(callSid)];
+
+  if (!call) {
+    return null;
+  }
+
+  call.pendingAction = pendingAction ? {
+    action: pendingAction.action,
+    speak: String(pendingAction.speak || ""),
+    createdAt: new Date().toISOString()
+  } : null;
+  call.updatedAt = new Date().toISOString();
+  await writeActiveCalls(calls);
+  return call;
+}
+
 async function readActiveCalls() {
   try {
     const content = await readFile(ACTIVE_CALLS_FILE, "utf8");
@@ -71,9 +90,19 @@ async function writeActiveCalls(calls) {
 
 async function runSelfTest() {
   await recordActiveCall("CA_TEST", "Briefing text", { eventId: "event-1" });
-  const call = await appendCallTurn("CA_TEST", "approve", "I can help with that.");
+  let call;
+
+  for (let index = 0; index < 12; index += 1) {
+    call = await appendCallTurn("CA_TEST", `turn ${index}`, "I can help with that.");
+  }
+
   const loaded = await getActiveCall("CA_TEST");
-  const passed = loaded?.briefing === "Briefing text" && call?.history?.length >= 1 && call?.exchangeCount >= 1;
+  await setCallPendingAction("CA_TEST", { speak: "Draft an email.", action: { type: "draft_email", payload: {} } });
+  const withPending = await getActiveCall("CA_TEST");
+  await setCallPendingAction("CA_TEST", null);
+  const cleared = await getActiveCall("CA_TEST");
+  const passed = loaded?.briefing === "Briefing text" && call?.history?.length === 10 && call?.exchangeCount === 12 &&
+    withPending?.pendingAction?.action?.type === "draft_email" && cleared?.pendingAction === null;
 
   console.log(`${passed ? "PASS" : "FAIL"} active call store`);
 

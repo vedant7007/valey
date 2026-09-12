@@ -112,7 +112,7 @@ async function dispatchApprovalRequest(event, decision, approval) {
   }
 
   if (decision.channel === "call") {
-    const result = await placeCall(callScript(decision, approval));
+    const result = await placeCall(callScript(decision, approval), callContext(event, decision, approval));
     logDispatchResult("call", result);
     return result;
   }
@@ -123,7 +123,7 @@ async function dispatchApprovalRequest(event, decision, approval) {
 
 async function dispatchNotification(decision) {
   if (decision.channel === "call") {
-    const result = await placeCall(callScript(decision));
+    const result = await placeCall(callScript(decision), callContext(null, decision));
     logDispatchResult("call", result);
     return result;
   }
@@ -246,6 +246,17 @@ async function stopAdapters() {
 function callScript(decision, approval = null) {
   const action = decision.proposedAction && approval ? ` Proposed action: ${decision.proposedAction.summary}. Reply ${approval.code} to approve.` : " Reply approve if you want Valey to draft the next step.";
   return `Valey found a critical item. ${decision.reason}.${action}`;
+}
+
+function callContext(event, decision, approval = null) {
+  return {
+    eventId: decision.eventId,
+    source: event?.source || null,
+    reason: decision.reason,
+    category: decision.category || null,
+    proposedAction: decision.proposedAction || null,
+    approvalCode: approval?.code || null
+  };
 }
 
 function notificationText(decision) {

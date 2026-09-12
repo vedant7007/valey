@@ -4,7 +4,7 @@ import { getGoogleOAuthClient } from "../../core/google.js";
 
 const SLOT_STEP_MINUTES = 15;
 
-export async function createEvent({ summary, start, end, description }) {
+export async function createEvent({ summary, start, end, description, reminders }) {
   const auth = getGoogleOAuthClient();
 
   if (!auth.ok) {
@@ -19,7 +19,8 @@ export async function createEvent({ summary, start, end, description }) {
         summary,
         description,
         start: { dateTime: new Date(start).toISOString() },
-        end: { dateTime: new Date(end).toISOString() }
+        end: { dateTime: new Date(end).toISOString() },
+        ...(Array.isArray(reminders?.overrides) ? { reminders } : {})
       }
     });
 

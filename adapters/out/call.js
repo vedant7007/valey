@@ -5,7 +5,7 @@ import { recordActiveCall } from "../../core/active-calls.js";
 const MAX_SPOKEN_CHARS = 300;
 const DEFAULT_SPOKEN_TEXT = "Valey found an urgent item that needs your attention.";
 
-export async function placeCall(spokenText) {
+export async function placeCall(spokenText, context = {}) {
   const config = getTwilioConfig();
 
   if (!config.ok) {
@@ -24,7 +24,7 @@ export async function placeCall(spokenText) {
       url: voiceUrl
     });
 
-    await recordActiveCall(call.sid, briefing, { channel: "call" });
+    await recordActiveCall(call.sid, briefing, { channel: "call", ...context });
     console.log(`Twilio call created: sid=${call.sid} status=${call.status}`);
     return { ok: true };
   } catch (error) {
