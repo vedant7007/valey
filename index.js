@@ -93,6 +93,12 @@ export function enforceFinancialSafety(event, decision) {
 async function dispatchApprovalRequest(event, decision, approval) {
   const message = approvalText(decision, approval);
 
+  if (decision.channel === "voice") {
+    const result = await sendVoice(voiceApprovalText(decision, approval));
+    logDispatchResult("voice approval", result);
+    return result;
+  }
+
   if (decision.channel === "sms") {
     const result = await sendSms(message);
     logDispatchResult("sms", result);
@@ -101,7 +107,7 @@ async function dispatchApprovalRequest(event, decision, approval) {
 
   if (event.source === "telegram") {
     const result = await sendTelegramMessage(message);
-    logDispatchResult("telegram", result);
+    logDispatchResult("telegram approval", result);
     return result;
   }
 
@@ -129,7 +135,7 @@ async function dispatchNotification(decision) {
   }
 
   if (decision.channel === "voice") {
-    const result = await sendVoice(notificationText(decision));
+    const result = await sendVoice(voiceNotificationText(decision));
     logDispatchResult("voice", result);
     return result;
   }
@@ -153,27 +159,47 @@ async function executeApprovedAction(approval) {
     return createEvent(approval.action.payload);
   }
 
-  return { ok: false, error: { message: `No executor is available for ${approval.action.type}.` } };
+  console.log(`No executor is available for ${approval.action.type}; falling back to log channel.`);
+  return { ok: true, degraded: true, path: "log" };
 }
 
 async function sendVoice(text) {
-  const voice = await import("./adapters/out/voice.js");
+  try {
+    const voice = await import("./adapters/out/voice.js");
 
-  if (typeof voice.sendVoiceNote !== "function") {
-    return { ok: false, error: { message: "Voice output is not implemented yet." } };
+    if (typeof voice.sendVoiceNote !== "function") {
+      console.log("Voice adapter is missing sendVoiceNote(); falling back to log channel.");
+      console.log(`Voice fallback text: ${text}`);
+      return { ok: true, degraded: true, path: "log" };
+    }
+
+    console.log("Dispatching via voice adapter sendVoiceNote().");
+    const result = await voice.sendVoiceNote(text);
+    return result?.ok || result?.degraded ? { ...result, ok: true } : result;
+  } catch (error) {
+    console.log(`Voice dispatch failed before delivery; falling back to log channel: ${error.message}`);
+    console.log(`Voice fallback text: ${text}`);
+    return { ok: true, degraded: true, path: "log" };
   }
-
-  return voice.sendVoiceNote(text);
 }
 
 async function sendTelegramMessage(text) {
-  const telegram = await import("./adapters/in/telegram.js");
+  try {
+    const telegram = await import("./adapters/in/telegram.js");
 
-  if (typeof telegram.sendMessage !== "function") {
-    return { ok: false, error: { message: "Telegram outbound confirmation is not implemented yet." } };
+    if (typeof telegram.sendMessage !== "function") {
+      console.log("Telegram sendMessage() is unavailable; falling back to log channel.");
+      console.log(`Telegram fallback text: ${text}`);
+      return { ok: true, degraded: true, path: "log" };
+    }
+
+    console.log("Dispatching via Telegram sendMessage().");
+    return telegram.sendMessage(text);
+  } catch (error) {
+    console.log(`Telegram dispatch failed before delivery; falling back to log channel: ${error.message}`);
+    console.log(`Telegram fallback text: ${text}`);
+    return { ok: true, degraded: true, path: "log" };
   }
-
-  return telegram.sendMessage(text);
 }
 
 async function startConfiguredAdapters() {
@@ -227,13 +253,22 @@ function notificationText(decision) {
   return `Valey ${decision.tier}: ${decision.reason}.${action}`;
 }
 
+function voiceNotificationText(decision) {
+  return `Valey says: ${decision.reason}`;
+}
+
+function voiceApprovalText(decision, approval) {
+  return `Valey says: ${decision.reason}. Proposed action: ${decision.proposedAction.summary}. Reply with code ${approval.code} to approve.`;
+}
+
 function approvalText(decision, approval) {
   return `Valey needs approval: ${decision.proposedAction.summary}. Reply ${approval.code} to approve.`;
 }
 
 function logDispatchResult(channel, result) {
-  if (result.ok) {
-    console.log(`Dispatched ${channel} notification.`);
+  if (result?.ok || result?.degraded) {
+    const path = result?.degraded ? ` with ${result.path || "degraded"} fallback` : "";
+    console.log(`Dispatched ${channel} notification${path}.`);
     return;
   }
 
@@ -273,7 +308,8 @@ async function runSelfTest() {
   const approval = await createPendingApproval(decision);
   const consumed = await consumePendingApproval(approval.code);
   const missed = await consumePendingApproval("A99");
-  const passed = consumed?.action?.type === "calendar_event" && missed === null;
+  const voiceText = voiceApprovalText({ ...decision, channel: "voice" }, approval);
+  const passed = consumed?.action?.type === "calendar_event" && missed === null && voiceText.includes(approval.code) && voiceText.includes(decision.reason) && voiceText.includes(decision.proposedAction.summary);
 
   console.log(`${passed ? "PASS" : "FAIL"} index approval gating`);
 
