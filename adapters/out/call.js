@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import twilio from "twilio";
 
 const MAX_SPOKEN_CHARS = 300;
+const DEFAULT_SPOKEN_TEXT = "Valey found an urgent item that needs your attention.";
 
 export async function placeCall(spokenText) {
   const config = getTwilioConfig();
@@ -10,17 +11,19 @@ export async function placeCall(spokenText) {
     return config;
   }
 
-  const script = capText(spokenText, MAX_SPOKEN_CHARS);
-  const twiml = `<Response><Say>${escapeXml(script)}</Say></Response>`;
+  const twiml = buildTwiML(spokenText);
+  console.log("Twilio call TwiML:");
+  console.log(twiml);
 
   try {
     const client = twilio(config.accountSid, config.authToken);
-    await client.calls.create({
+    const call = await client.calls.create({
       to: config.userPhoneNumber,
       from: config.twilioPhoneNumber,
       twiml
     });
 
+    console.log(`Twilio call created: sid=${call.sid} status=${call.status}`);
     return { ok: true };
   } catch (error) {
     if (error.code) {
@@ -50,6 +53,12 @@ function getTwilioConfig() {
   return { ok: true, accountSid, authToken, twilioPhoneNumber, userPhoneNumber };
 }
 
+export function buildTwiML(spokenText) {
+  const script = capText(spokenText, MAX_SPOKEN_CHARS);
+  const escaped = escapeXml(script).trim() || DEFAULT_SPOKEN_TEXT;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Say voice="alice">${escaped}</Say></Response>`;
+}
+
 function capText(text, maxLength) {
   const value = String(text ?? "").trim();
   return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
@@ -65,10 +74,22 @@ function escapeXml(text) {
 }
 
 async function runSelfTest() {
-  const result = await placeCall("A critical item needs approval. Reply approve to continue.");
-  const passed = result.ok === false && result.error?.missing?.length > 0;
+  const sample = "Urgent: R&D's launch review is blocked & needs approval.";
+  const twiml = buildTwiML(sample);
+  const emptyTwiml = buildTwiML("   ");
+  console.log("Sample TwiML:");
+  console.log(twiml);
+  const passed = [
+    twiml.startsWith("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Pause length=\"1\"/><Say voice=\"alice\">"),
+    twiml.endsWith("</Say></Response>"),
+    twiml.includes("R&amp;D&apos;s launch review"),
+    twiml.includes("blocked &amp; needs approval."),
+    !twiml.includes("Urgent: R&D's"),
+    twiml.includes("Urgent: "),
+    emptyTwiml.includes(DEFAULT_SPOKEN_TEXT)
+  ].every(Boolean);
 
-  console.log(`${passed ? "PASS" : "FAIL"} call missing-env guard`);
+  console.log(`${passed ? "PASS" : "FAIL"} call twiml generation`);
 
   if (!passed) {
     process.exitCode = 1;
