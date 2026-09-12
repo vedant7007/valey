@@ -15,6 +15,7 @@
     <div class="brand">
       <span class="dot" id="status-dot" aria-hidden="true"></span>
       <h1 class="wordmark">Valey</h1>
+      <span class="link-state" id="link-state" aria-live="polite" hidden>Reconnecting</span>
       <span class="last"><span class="last-key">Last event</span> <span class="num" id="last-event">none yet</span></span>
     </div>
     <p class="adapters"><span class="num" data-adapters>&ndash;</span> <span data-adapters-label>adapters active</span></p>
@@ -43,10 +44,10 @@
     <section class="panel" aria-labelledby="tiers-title">
       <h2 class="section-title" id="tiers-title">Urgency tiers</h2>
       <div class="tier-bar" id="tier-bar" role="img" aria-label="No events yet">
-        <span class="seg critical" data-tier="critical"></span>
-        <span class="seg high" data-tier="high"></span>
-        <span class="seg normal" data-tier="normal"></span>
-        <span class="seg low" data-tier="low"></span>
+        <span class="seg critical" data-tier="critical"><span class="pct num"></span></span>
+        <span class="seg high" data-tier="high"><span class="pct num"></span></span>
+        <span class="seg normal" data-tier="normal"><span class="pct num"></span></span>
+        <span class="seg low" data-tier="low"><span class="pct num"></span></span>
       </div>
       <ul class="legend">
         <li><span class="swatch critical"></span>Critical <span class="num" data-legend="critical">0</span></li>
@@ -58,15 +59,23 @@
 
     <section class="panel" aria-labelledby="spark-title">
       <h2 class="section-title" id="spark-title">Recent activity <span class="count" id="avg-response"></span></h2>
-      <svg class="spark" id="spark" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="No events yet"></svg>
+      <div class="spark-frame">
+        <svg class="spark" id="spark" role="img" aria-label="No events yet">
+          <defs>
+            <linearGradient id="spark-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="currentColor" stop-opacity="0.26"></stop>
+              <stop offset="1" stop-color="currentColor" stop-opacity="0"></stop>
+            </linearGradient>
+          </defs>
+          <g id="spark-plot"></g>
+        </svg>
+      </div>
       <p class="caption">Last 20 events, oldest to newest. Height is urgency.</p>
     </section>
 
     <section aria-labelledby="pending-title">
       <h2 class="section-title" id="pending-title">Awaiting approval <span class="count num" id="pending-count"></span></h2>
-      <div class="list" id="pending">
-        <p class="empty">Nothing awaiting your approval.</p>
-      </div>
+      <div class="list" id="pending"></div>
     </section>
 
     <section aria-labelledby="feed-title">
@@ -78,16 +87,30 @@
         <button type="button" class="filter" data-source="discord" aria-pressed="false">Discord</button>
         <button type="button" class="filter" data-source="calendar" aria-pressed="false">Calendar</button>
       </div>
-      <div class="list" id="feed">
-        <p class="empty">No decisions recorded yet.</p>
-      </div>
+      <div class="list" id="feed"></div>
     </section>
   </main>
 
   <template id="lock-icon">
-    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <rect x="3" y="7" width="10" height="7" rx="1.5"></rect>
-      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"></path>
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="4" y="9" width="12" height="8.5" rx="1.5"></rect>
+      <path d="M6.75 9V6.5a3.25 3.25 0 0 1 6.5 0V9"></path>
+      <circle cx="10" cy="13.25" r="1" fill="currentColor" stroke="none"></circle>
+    </svg>
+  </template>
+
+  <template id="clear-icon">
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M8.5 12.25 10.75 14.5 15.5 9.75"></path>
+    </svg>
+  </template>
+
+  <template id="tray-icon">
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 13.5V17a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 17v-3.5"></path>
+      <path d="M4 13.5h4.25a1 1 0 0 1 .9.55l.4.8a1 1 0 0 0 .9.55h3.1a1 1 0 0 0 .9-.55l.4-.8a1 1 0 0 1 .9-.55H20"></path>
+      <path d="M6.5 13.5 8 6.5h8l1.5 7"></path>
     </svg>
   </template>
 

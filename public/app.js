@@ -4,10 +4,11 @@
   var POLL_MS = 1500;
   var TICK_MS = 1000;
   var COUNT_MS = 400;
-  var LEAVE_MS = 200;
+  var LEAVE_MS = 240;
   var TIMELINE_SLOTS = 20;
+  var MIN_LABEL_WIDTH = 34;
   var TIERS = ["critical", "high", "normal", "low"];
-  var TIER_HEIGHT = { critical: 100, high: 74, normal: 48, low: 22 };
+  var TIER_LEVEL = { critical: 1, high: 0.72, normal: 0.44, low: 0.16 };
   var CHANNEL_LABEL = { call: "Phone call", sms: "SMS", voice: "Voice note", log: "Logged only" };
   var SOURCE_LABEL = { gmail: "Gmail", calendar: "Calendar", telegram: "Telegram", discord: "Discord" };
   var RESPONSE_LABEL = { approved: "Approved", rejected: "Declined", ignored: "Ignored" };
@@ -18,17 +19,24 @@
 
   var reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   var dot = document.getElementById("status-dot");
+  var linkState = document.getElementById("link-state");
   var pulse = document.getElementById("pulse");
   var feed = document.getElementById("feed");
   var pendingList = document.getElementById("pending");
   var tierBar = document.getElementById("tier-bar");
   var spark = document.getElementById("spark");
+  var sparkPlot = document.getElementById("spark-plot");
   var lastEvent = document.getElementById("last-event");
-  var lockTemplate = document.getElementById("lock-icon");
+  var templates = {
+    lock: document.getElementById("lock-icon"),
+    clear: document.getElementById("clear-icon"),
+    tray: document.getElementById("tray-icon")
+  };
 
   var firstRender = true;
   var lastData = null;
   var lastEventAt = null;
+  var lastTimeline = [];
   var sourceFilter = "";
   var seenDecisions = {};
   var seenPending = {};
@@ -51,6 +59,10 @@
     var node = document.createElementNS(SVG_NS, tag);
     for (var key in attrs) node.setAttribute(key, attrs[key]);
     return node;
+  }
+
+  function icon(name) {
+    return templates[name].content.cloneNode(true);
   }
 
   function label(map, key) {
@@ -88,9 +100,20 @@
 
   function timeRemaining(iso) {
     var ms = Date.parse(iso) - Date.now();
-    if (!isFinite(ms) || ms <= 0) return "Expired";
-    var m = Math.ceil(ms / 60000);
-    return m < 1 ? "Under a minute left" : m + " min left";
+    if (!isFinite(ms)) return "";
+    if (ms <= 0) return "Expired";
+    var total = Math.ceil(ms / 1000);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    return (h ? h + ":" + pad(m) : String(m)) + ":" + pad(s) + " left";
+  }
+
+  function remainingFraction(createdAt, expiresAt) {
+    var span = Date.parse(expiresAt) - Date.parse(createdAt);
+    var left = Date.parse(expiresAt) - Date.now();
+    if (!isFinite(span) || span <= 0 || !isFinite(left)) return 0;
+    return Math.max(0, Math.min(1, left / span));
   }
 
   function duration(seconds) {
@@ -110,7 +133,7 @@
     return (item.code || "") + "@" + (item.createdAt || "");
   }
 
-  // Live clocks: stamps, countdowns and the header ticker refresh without a refetch.
+  // Live clocks: stamps, countdowns, TTL tracks and the header ticker refresh without a refetch.
   function tick() {
     var stamps = document.querySelectorAll("[data-ts]");
     for (var i = 0; i < stamps.length; i++) {
@@ -120,11 +143,17 @@
     for (var j = 0; j < timers.length; j++) {
       timers[j].textContent = timeRemaining(timers[j].getAttribute("data-expires"));
     }
+    var tracks = document.querySelectorAll("[data-ttl-from]");
+    for (var k = 0; k < tracks.length; k++) {
+      var fraction = remainingFraction(tracks[k].getAttribute("data-ttl-from"), tracks[k].getAttribute("data-ttl-to"));
+      tracks[k].style.transform = "scaleX(" + fraction.toFixed(4) + ")";
+    }
     if (lastEventAt) lastEvent.textContent = preciseTime(lastEventAt);
   }
 
   function setStatus(state) {
     dot.setAttribute("data-state", state);
+    linkState.hidden = state !== "stale";
   }
 
   function restartPulse() {
@@ -154,6 +183,23 @@
     requestAnimationFrame(step);
   }
 
+  function emptyState(name, title, copy) {
+    var node = el("div", "empty");
+    node.appendChild(icon(name));
+    node.appendChild(el("span", "empty-title", title));
+    if (copy) node.appendChild(el("span", "empty-copy", copy));
+    return node;
+  }
+
+  function pendingEmpty() {
+    return emptyState("clear", "Nothing awaiting your approval.", "Drafted actions appear here until you release or decline them.");
+  }
+
+  function feedEmpty() {
+    if (sourceFilter) return emptyState("tray", "Nothing from " + label(SOURCE_LABEL, sourceFilter) + " yet.", "Decisions from this source appear here as they are made.");
+    return emptyState("tray", "No decisions recorded yet.", "Each event Valey sees is judged and logged here.");
+  }
+
   function renderStats(stats, adapters) {
     var values = document.querySelectorAll("[data-stat]");
     for (var i = 0; i < values.length; i++) {
@@ -180,37 +226,94 @@
       parts.push(TIERS[i] + " " + n);
       setNumber(document.querySelector("[data-legend=" + TIERS[i] + "]"), n);
     }
+    var inner = tierBar.clientWidth - 6;
     for (var k = 0; k < TIERS.length; k++) {
       var seg = tierBar.querySelector("[data-tier=" + TIERS[k] + "]");
       var count = Number(stats[TIERS[k]]) || 0;
+      var pct = total ? 100 * count / total : 0;
       seg.hidden = count === 0;
-      seg.style.width = total ? (100 * count / total).toFixed(2) + "%" : "0%";
+      seg.style.width = pct.toFixed(2) + "%";
+      var labelled = inner * pct / 100 >= MIN_LABEL_WIDTH;
+      seg.setAttribute("data-labelled", labelled ? "true" : "false");
+      seg.firstElementChild.textContent = labelled ? Math.round(pct) + "%" : "";
     }
     tierBar.setAttribute("aria-label", total ? "Urgency tiers: " + parts.join(", ") : "No events yet");
   }
 
-  // Twenty slots, oldest left; unfilled slots draw as stubs so the shape is stable.
+  function dominantTier(timeline) {
+    var counts = {};
+    for (var i = 0; i < timeline.length; i++) counts[timeline[i].tier] = (counts[timeline[i].tier] || 0) + 1;
+    var best = "low";
+    var bestCount = 0;
+    for (var t = TIERS.length - 1; t >= 0; t--) {
+      if ((counts[TIERS[t]] || 0) >= bestCount) {
+        best = TIERS[t];
+        bestCount = counts[TIERS[t]] || 0;
+      }
+    }
+    return best;
+  }
+
+  // Catmull-Rom through the points, emitted as cubic segments so the curve passes through every event.
+  function smoothPath(points) {
+    if (points.length < 2) return "";
+    var d = "M" + points[0].x.toFixed(1) + " " + points[0].y.toFixed(1);
+    for (var i = 0; i < points.length - 1; i++) {
+      var p0 = points[i - 1] || points[i];
+      var p1 = points[i];
+      var p2 = points[i + 1];
+      var p3 = points[i + 2] || p2;
+      var c1x = p1.x + (p2.x - p0.x) / 6;
+      var c1y = p1.y + (p2.y - p0.y) / 6;
+      var c2x = p2.x - (p3.x - p1.x) / 6;
+      var c2y = p2.y - (p3.y - p1.y) / 6;
+      d += " C" + c1x.toFixed(1) + " " + c1y.toFixed(1) + " " + c2x.toFixed(1) + " " + c2y.toFixed(1) + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1);
+    }
+    return d;
+  }
+
+  // Twenty slots, oldest left, drawn in real pixels so strokes and the marker stay round.
   function renderSpark(timeline) {
-    var sig = JSON.stringify(timeline);
+    lastTimeline = timeline;
+    var width = spark.clientWidth || 300;
+    var height = spark.clientHeight || 56;
+    var sig = width + "x" + height + ":" + JSON.stringify(timeline);
     if (sig === lastTimelineSig) return;
     lastTimelineSig = sig;
 
-    var slotWidth = 100 / TIMELINE_SLOTS;
-    var barWidth = slotWidth * 0.62;
+    var padX = 6;
+    var padTop = 6;
+    var padBottom = 4;
+    var floor = height - padBottom;
+    var step = (width - padX * 2) / (TIMELINE_SLOTS - 1);
     var offset = TIMELINE_SLOTS - timeline.length;
     var frag = document.createDocumentFragment();
-    for (var i = 0; i < TIMELINE_SLOTS; i++) {
-      var entry = i >= offset ? timeline[i - offset] : null;
-      var height = entry ? (TIER_HEIGHT[entry.tier] || TIER_HEIGHT.low) : 6;
-      frag.appendChild(svgEl("rect", {
-        x: (i * slotWidth + (slotWidth - barWidth) / 2).toFixed(2),
-        y: (100 - height).toFixed(2),
-        width: barWidth.toFixed(2),
-        height: height,
-        "class": entry ? (TIERS.indexOf(entry.tier) >= 0 ? entry.tier : "low") : "stub"
-      }));
+
+    frag.appendChild(svgEl("line", { "class": "baseline", x1: padX, y1: floor, x2: width - padX, y2: floor }));
+
+    var points = [];
+    for (var i = 0; i < timeline.length; i++) {
+      var level = TIER_LEVEL[timeline[i].tier] || TIER_LEVEL.low;
+      points.push({ x: padX + (offset + i) * step, y: padTop + (1 - level) * (floor - padTop) });
     }
-    spark.replaceChildren(frag);
+
+    if (points.length >= 2) {
+      var line = smoothPath(points);
+      var last = points[points.length - 1];
+      var first = points[0];
+      frag.appendChild(svgEl("path", { "class": "area", d: line + " L" + last.x.toFixed(1) + " " + floor + " L" + first.x.toFixed(1) + " " + floor + " Z" }));
+      frag.appendChild(svgEl("path", { "class": "line", d: line }));
+    }
+
+    if (points.length) {
+      var tip = points[points.length - 1];
+      frag.appendChild(svgEl("circle", { "class": "ring", cx: tip.x.toFixed(1), cy: tip.y.toFixed(1), r: 3 }));
+      frag.appendChild(svgEl("circle", { "class": "point", cx: tip.x.toFixed(1), cy: tip.y.toFixed(1), r: 2.5 }));
+    }
+
+    spark.setAttribute("viewBox", "0 0 " + width + " " + height);
+    spark.setAttribute("class", "spark " + (timeline.length ? dominantTier(timeline) : "low"));
+    sparkPlot.replaceChildren(frag);
     spark.setAttribute("aria-label", timeline.length ? "Urgency of the last " + timeline.length + " events" : "No events yet");
   }
 
@@ -226,6 +329,14 @@
     remaining.setAttribute("data-expires", item.expiresAt || "");
     head.appendChild(remaining);
     card.appendChild(head);
+
+    var ttl = el("div", "ttl");
+    var fill = el("div", "ttl-fill");
+    fill.setAttribute("data-ttl-from", item.createdAt || "");
+    fill.setAttribute("data-ttl-to", item.expiresAt || "");
+    fill.style.transform = "scaleX(" + remainingFraction(item.createdAt, item.expiresAt).toFixed(4) + ")";
+    ttl.appendChild(fill);
+    card.appendChild(ttl);
 
     card.appendChild(el("p", "summary", (item.action && item.action.summary) || "Proposed action"));
 
@@ -279,7 +390,7 @@
 
     var body = el("div", "withheld-body");
     var lock = el("span", "lock");
-    lock.appendChild(lockTemplate.content.cloneNode(true));
+    lock.appendChild(icon("lock"));
     body.appendChild(lock);
     var text = el("p", "withheld-text");
     text.appendChild(el("strong", null, "Content withheld."));
@@ -320,9 +431,9 @@
     return card;
   }
 
-  function renderList(container, items, keyOf, build, fresh, animClass, emptyText) {
+  function renderList(container, items, keyOf, build, fresh, animClass, empty) {
     var frag = document.createDocumentFragment();
-    if (!items.length) frag.appendChild(el("p", "empty", emptyText));
+    if (!items.length) frag.appendChild(empty());
     for (var i = 0; i < items.length; i++) {
       var node = build(items[i]);
       if (!firstRender && fresh[keyOf(items[i])]) node.classList.add(animClass);
@@ -339,7 +450,7 @@
     var sig = JSON.stringify(visible);
     if (sig === lastPendingSig) return;
     lastPendingSig = sig;
-    renderList(pendingList, visible, pendingKey, pendingCard, fresh, "enter", "Nothing awaiting your approval.");
+    renderList(pendingList, visible, pendingKey, pendingCard, fresh, "enter", pendingEmpty);
     document.getElementById("pending-count").textContent = visible.length ? String(visible.length) : "";
   }
 
@@ -351,8 +462,7 @@
     var sig = sourceFilter + "|" + JSON.stringify(visible);
     if (sig === lastFeedSig) return;
     lastFeedSig = sig;
-    var emptyText = sourceFilter ? "Nothing from " + label(SOURCE_LABEL, sourceFilter) + " yet." : "No decisions recorded yet.";
-    renderList(feed, visible, function (d) { return d.id; }, decisionCard, fresh, "flash", emptyText);
+    renderList(feed, visible, function (d) { return d.id; }, decisionCard, fresh, "flash", feedEmpty);
     document.getElementById("feed-count").textContent = visible.length ? String(visible.length) : "";
   }
 
@@ -390,7 +500,7 @@
   function detachCard(card) {
     if (card.parentNode) card.parentNode.removeChild(card);
     if (!pendingList.querySelector(".card")) {
-      pendingList.replaceChildren(el("p", "empty", "Nothing awaiting your approval."));
+      pendingList.replaceChildren(pendingEmpty());
     }
     var left = pendingList.querySelectorAll(".card").length;
     document.getElementById("pending-count").textContent = left ? String(left) : "";
@@ -456,6 +566,12 @@
     if (lastData) renderFeed(Array.isArray(lastData.decisions) ? lastData.decisions : [], {});
   });
 
+  // Pixel-based drawings follow the viewport.
+  window.addEventListener("resize", function () {
+    renderSpark(lastTimeline);
+    if (lastData && lastData.stats) renderTiers(lastData.stats);
+  });
+
   function poll() {
     fetch("/api/state", { cache: "no-store" })
       .then(function (response) {
@@ -475,6 +591,9 @@
       });
   }
 
+  pendingList.replaceChildren(pendingEmpty());
+  feed.replaceChildren(feedEmpty());
+  renderSpark([]);
   poll();
   setInterval(tick, TICK_MS);
 })();
