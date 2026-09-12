@@ -41,6 +41,22 @@
       </article>
     </section>
 
+    <section class="today" aria-labelledby="today-title">
+      <button type="button" class="today-head" id="today-toggle" aria-expanded="false" aria-controls="today-body">
+        <span class="today-label" id="today-title">Today</span>
+        <span class="today-headline num" id="today-headline">&ndash;</span>
+        <span class="chev" aria-hidden="true"></span>
+      </button>
+      <div class="today-body" id="today-body" hidden>
+        <div class="today-content" id="today-content"></div>
+        <div class="today-actions">
+          <button type="button" class="btn quiet" data-today="refresh">Refresh</button>
+          <button type="button" class="btn" data-today="speak">Send as voice note</button>
+        </div>
+        <p class="today-status" id="today-status" hidden></p>
+      </div>
+    </section>
+
     <section class="panel" aria-labelledby="tiers-title">
       <h2 class="section-title" id="tiers-title">Urgency tiers</h2>
       <div class="tier-bar" id="tier-bar" role="img" aria-label="No events yet">
@@ -79,7 +95,20 @@
     </section>
 
     <section aria-labelledby="feed-title">
-      <h2 class="section-title" id="feed-title">Activity <span class="count num" id="feed-count"></span></h2>
+      <h2 class="section-title" id="feed-title">Activity
+        <span class="title-tools">
+          <span class="count num" id="feed-count"></span>
+          <button type="button" class="quiet-action" id="manage-toggle" aria-expanded="false" aria-controls="manage-panel">Manage</button>
+        </span>
+      </h2>
+      <div class="manage-panel" id="manage-panel" hidden>
+        <p class="manage-hint">Cleared entries are archived, and a ledger line records the clear. Pending approvals are not affected.</p>
+        <div class="manage-actions">
+          <button type="button" class="btn" data-clear="low">Clear low priority</button>
+          <button type="button" class="btn" data-clear="all">Clear all</button>
+        </div>
+        <p class="note" id="manage-note" hidden></p>
+      </div>
       <div class="filters" id="filters" role="group" aria-label="Filter by source">
         <button type="button" class="filter" data-source="" aria-pressed="true">All</button>
         <button type="button" class="filter" data-source="gmail" aria-pressed="false">Gmail</button>
@@ -103,6 +132,12 @@
     <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="9"></circle>
       <path d="M8.5 12.25 10.75 14.5 15.5 9.75"></path>
+    </svg>
+  </template>
+
+  <template id="chevron-icon">
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 6.25 8 10.25l4-4"></path>
     </svg>
   </template>
 

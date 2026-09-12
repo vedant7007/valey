@@ -30,7 +30,20 @@
   var templates = {
     lock: document.getElementById("lock-icon"),
     clear: document.getElementById("clear-icon"),
-    tray: document.getElementById("tray-icon")
+    tray: document.getElementById("tray-icon"),
+    chevron: document.getElementById("chevron-icon")
+  };
+  var today = {
+    toggle: document.getElementById("today-toggle"),
+    body: document.getElementById("today-body"),
+    headline: document.getElementById("today-headline"),
+    content: document.getElementById("today-content"),
+    status: document.getElementById("today-status")
+  };
+  var manage = {
+    toggle: document.getElementById("manage-toggle"),
+    panel: document.getElementById("manage-panel"),
+    note: document.getElementById("manage-note")
   };
 
   var firstRender = true;
@@ -215,6 +228,10 @@
 
     var avg = document.getElementById("avg-response");
     avg.textContent = typeof stats.avgResponseSeconds === "number" ? "Avg response " + duration(stats.avgResponseSeconds) : "";
+
+    if (typeof stats.last24h === "number") {
+      today.headline.textContent = stats.last24h ? stats.last24h + (stats.last24h === 1 ? " event" : " events") + " in the last 24 hours" : "No events in the last 24 hours";
+    }
   }
 
   function renderTiers(stats) {
@@ -405,7 +422,20 @@
     return card;
   }
 
+  function ledgerLine(entry) {
+    var line = el("div", "ledger");
+    line.setAttribute("role", "note");
+    var text = el("span", "ledger-text");
+    text.appendChild(el("span", null, entry.reason || "Activity log cleared."));
+    var removed = Number(entry.removed) || 0;
+    text.appendChild(el("span", "num", removed + (removed === 1 ? " entry archived." : " entries archived.")));
+    text.appendChild(timeNode(entry.recordedAt, "time"));
+    line.appendChild(text);
+    return line;
+  }
+
   function decisionCard(entry) {
+    if (entry.kind === "marker") return ledgerLine(entry);
     if (entry.category === "financial") return withheldCard(entry);
 
     var tier = TIERS.indexOf(entry.tier) >= 0 ? entry.tier : "low";
@@ -436,7 +466,7 @@
     if (!items.length) frag.appendChild(empty());
     for (var i = 0; i < items.length; i++) {
       var node = build(items[i]);
-      if (!firstRender && fresh[keyOf(items[i])]) node.classList.add(animClass);
+      if (!firstRender && fresh[keyOf(items[i])]) node.classList.add(node.classList.contains("ledger") ? "enter" : animClass);
       frag.appendChild(node);
     }
     container.replaceChildren(frag);
@@ -454,16 +484,24 @@
     document.getElementById("pending-count").textContent = visible.length ? String(visible.length) : "";
   }
 
+  // Ledger markers ignore the source filter and never count as events.
   function renderFeed(decisions, fresh) {
     var visible = [];
+    var events = 0;
     for (var i = 0; i < decisions.length; i++) {
-      if (!sourceFilter || decisions[i].source === sourceFilter) visible.push(decisions[i]);
+      var isMarker = decisions[i].kind === "marker";
+      if (isMarker || !sourceFilter || decisions[i].source === sourceFilter) visible.push(decisions[i]);
+      if (!isMarker && (!sourceFilter || decisions[i].source === sourceFilter)) events++;
     }
     var sig = sourceFilter + "|" + JSON.stringify(visible);
     if (sig === lastFeedSig) return;
     lastFeedSig = sig;
-    renderList(feed, visible, function (d) { return d.id; }, decisionCard, fresh, "flash", feedEmpty);
-    document.getElementById("feed-count").textContent = visible.length ? String(visible.length) : "";
+    var onlyMarkers = visible.length && events === 0;
+    renderList(feed, onlyMarkers ? [] : visible, function (d) { return d.id; }, decisionCard, fresh, "flash", feedEmpty);
+    if (onlyMarkers) {
+      for (var m = 0; m < visible.length; m++) feed.appendChild(ledgerLine(visible[m]));
+    }
+    document.getElementById("feed-count").textContent = events ? String(events) : "";
   }
 
   function render(data) {
@@ -566,6 +604,170 @@
     if (lastData) renderFeed(Array.isArray(lastData.decisions) ? lastData.decisions : [], {});
   });
 
+  // Today: fetched on expand and on refresh, never in the poll loop.
+  function todayButtons(disabled, workingKey) {
+    var buttons = today.body.querySelectorAll("[data-today]");
+    for (var i = 0; i < buttons.length; i++) {
+      var key = buttons[i].getAttribute("data-today");
+      buttons[i].disabled = disabled;
+      buttons[i].textContent = key === "speak" ? (workingKey === "speak" ? "Sending…" : "Send as voice note") : (workingKey === "refresh" ? "Refreshing…" : "Refresh");
+    }
+  }
+
+  function todayStatus(text, tone) {
+    today.status.hidden = !text;
+    today.status.textContent = text || "";
+    if (tone) today.status.setAttribute("data-tone", tone);
+    else today.status.removeAttribute("data-tone");
+  }
+
+  function todaySkeleton() {
+    var box = el("div", "skeleton");
+    box.setAttribute("aria-hidden", "true");
+    for (var i = 0; i < 4; i++) box.appendChild(el("span"));
+    return box;
+  }
+
+  function todayFailure() {
+    var box = el("div");
+    box.appendChild(el("p", "today-status", "The summary could not be built."));
+    var retry = el("button", "retry", "Try again");
+    retry.type = "button";
+    retry.setAttribute("data-today", "retry");
+    box.appendChild(retry);
+    return box;
+  }
+
+  function loadSummary() {
+    today.content.replaceChildren(todaySkeleton());
+    today.content.setAttribute("aria-busy", "true");
+    todayStatus("");
+    todayButtons(true, "refresh");
+
+    fetch("/api/summary", { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json();
+      })
+      .then(function (data) {
+        var text = el("p", "today-text", (data && data.text) || "Valey has nothing to report yet.");
+        var stamp = Date.parse(data && data.generatedAt);
+        var meta = el("p", "today-meta", isFinite(stamp) ? "Generated " + new Date(stamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+        today.content.replaceChildren(text, meta);
+        if (data && data.counts && typeof data.counts.handled === "number") {
+          today.headline.textContent = data.counts.handled ? data.counts.handled + (data.counts.handled === 1 ? " event" : " events") + " in the last 24 hours" : "No events in the last 24 hours";
+        }
+      })
+      .catch(function () {
+        today.content.replaceChildren(todayFailure());
+      })
+      .then(function () {
+        today.content.removeAttribute("aria-busy");
+        todayButtons(false);
+      });
+  }
+
+  function speakSummary() {
+    todayStatus("");
+    todayButtons(true, "speak");
+    fetch("/api/summary/speak", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+      .then(function (response) { return response.json(); })
+      .catch(function () { return { ok: false, reason: "Could not reach Valey. Try again." }; })
+      .then(function (result) {
+        if (result && result.ok) todayStatus(result.degraded ? "Sent as text" : "Sent as voice note");
+        else todayStatus((result && result.reason) || "The voice note could not be sent.", "error");
+        todayButtons(false);
+      });
+  }
+
+  today.toggle.addEventListener("click", function () {
+    var open = today.toggle.getAttribute("aria-expanded") !== "true";
+    today.toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    today.body.hidden = !open;
+    if (open) loadSummary();
+  });
+
+  today.body.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-today]");
+    if (!button || button.disabled) return;
+    var key = button.getAttribute("data-today");
+    if (key === "speak") speakSummary();
+    else loadSummary();
+  });
+
+  // Manage: clearing is two taps for everything, one for low priority, and always leaves a ledger line.
+  var confirmTimer = null;
+
+  function disarmClearAll() {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
+    var button = manage.panel.querySelector('[data-clear="all"]');
+    button.textContent = "Clear all";
+    button.removeAttribute("data-armed");
+  }
+
+  function manageButtons(disabled, workingScope) {
+    var buttons = manage.panel.querySelectorAll("[data-clear]");
+    for (var i = 0; i < buttons.length; i++) {
+      var scope = buttons[i].getAttribute("data-clear");
+      buttons[i].disabled = disabled;
+      if (workingScope === scope) buttons[i].textContent = "Clearing…";
+      else if (!disabled) buttons[i].textContent = scope === "low" ? "Clear low priority" : "Clear all";
+    }
+  }
+
+  function clearLog(scope) {
+    manage.note.hidden = true;
+    manageButtons(true, scope);
+
+    fetch("/api/clear-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scope: scope }) })
+      .then(function (response) { return response.json(); })
+      .catch(function () { return { ok: false, reason: "Could not reach Valey. Try again." }; })
+      .then(function (result) {
+        manageButtons(false);
+        if (!(result && result.ok)) {
+          manage.note.textContent = (result && result.reason) || "The log could not be cleared.";
+          manage.note.hidden = false;
+          return;
+        }
+        manage.panel.hidden = true;
+        manage.toggle.setAttribute("aria-expanded", "false");
+        lastFeedSig = null;
+        if (!reducedMotion.matches) {
+          var cards = feed.querySelectorAll(".card");
+          for (var i = 0; i < cards.length; i++) cards[i].classList.add("leave");
+        }
+      });
+  }
+
+  manage.toggle.addEventListener("click", function () {
+    var open = manage.panel.hidden;
+    manage.panel.hidden = !open;
+    manage.toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    manage.note.hidden = true;
+    if (!open) disarmClearAll();
+  });
+
+  manage.panel.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-clear]");
+    if (!button || button.disabled) return;
+    var scope = button.getAttribute("data-clear");
+    if (scope === "low") {
+      disarmClearAll();
+      clearLog("low");
+      return;
+    }
+    if (button.getAttribute("data-armed") === "true") {
+      disarmClearAll();
+      clearLog("all");
+      return;
+    }
+    button.textContent = "Confirm clear";
+    button.setAttribute("data-armed", "true");
+    clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(disarmClearAll, 3000);
+  });
+
   // Pixel-based drawings follow the viewport.
   window.addEventListener("resize", function () {
     renderSpark(lastTimeline);
@@ -591,6 +793,7 @@
       });
   }
 
+  today.toggle.querySelector(".chev").appendChild(icon("chevron"));
   pendingList.replaceChildren(pendingEmpty());
   feed.replaceChildren(feedEmpty());
   renderSpark([]);

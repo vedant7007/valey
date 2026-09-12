@@ -229,6 +229,157 @@ main {
   margin-top: var(--s3);
 }
 
+/* Today: collapsed to one line until asked. */
+
+.today {
+  margin-top: var(--s2);
+  background: linear-gradient(180deg, var(--surface-top), var(--surface));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--edge), var(--shadow);
+}
+
+.today-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 48px;
+  padding: 0 var(--s4);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.today-head:active {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.today-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--label);
+}
+
+.today-headline {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chev {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--muted);
+  transition: transform 240ms var(--ease-out);
+}
+
+.today-head[aria-expanded="true"] .chev {
+  transform: rotate(180deg);
+}
+
+.today-body {
+  padding: 0 var(--s4) var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+.today-content {
+  padding-top: var(--s3);
+}
+
+.today-text {
+  margin: 0;
+  font-size: 15.5px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.today-meta {
+  margin: var(--s2) 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 0 4px;
+}
+
+.skeleton span {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--line);
+  animation: breathe 2s var(--ease-inout) infinite;
+}
+
+.skeleton span:nth-child(2) { width: 92%; animation-delay: 120ms; }
+.skeleton span:nth-child(3) { width: 76%; animation-delay: 240ms; }
+.skeleton span:nth-child(4) { width: 48%; animation-delay: 360ms; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.today-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.today-status {
+  margin: var(--s2) 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.today-status[data-tone="error"] {
+  color: var(--high);
+}
+
+.btn.quiet {
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn.quiet:active {
+  color: var(--text);
+}
+
+.retry {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--s3);
+  margin: var(--s1) 0 0 calc(var(--s3) * -1);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
 /* Sections */
 
 .section-title {
@@ -245,6 +396,93 @@ main {
   letter-spacing: 0;
   text-transform: none;
   white-space: nowrap;
+}
+
+.title-tools {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+}
+
+/* Quiet affordance: a label-weight word with a full 44px hit area that does not grow the row. */
+
+.quiet-action {
+  padding: 14px 0 14px var(--s3);
+  margin: -14px 0;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 160ms var(--ease-out);
+}
+
+.quiet-action[aria-expanded="true"],
+.quiet-action:active {
+  color: var(--text);
+}
+
+.manage-panel {
+  margin-bottom: var(--s2);
+  padding: var(--s3) var(--s4) var(--s4);
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.manage-hint {
+  margin: 0 0 var(--s3);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.manage-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+}
+
+.btn[data-armed="true"] {
+  border-color: var(--high);
+  color: var(--high);
+}
+
+/* Ledger line: a clear leaves a trace that reads as bookkeeping, not an event. */
+
+.ledger {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  text-align: center;
+}
+
+.ledger::before,
+.ledger::after {
+  content: "";
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.ledger-text {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 var(--s2);
+}
+
+.ledger .time {
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .panel {
