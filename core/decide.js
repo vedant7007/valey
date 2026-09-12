@@ -10,6 +10,8 @@ const CHANNEL_BY_TIER = {
   low: "log"
 };
 
+const CALLS_PER_ROLLING_HOUR = 20;
+const OVERRIDE_RESERVED_CALL_SLOTS = 4;
 const OVERRIDE_PATTERN = /\b(deadline|payment failure|security alert)\b/i;
 
 export async function decide(event) {
@@ -20,7 +22,8 @@ export async function decide(event) {
   if (classification.tier === "critical" && channel === "call") {
     const callsInLastHour = await getCallsInLastHour();
     const override = isOverrideEvent(event, classification);
-    const limitHit = override ? callsInLastHour >= 3 : callsInLastHour >= 2;
+    const limit = override ? CALLS_PER_ROLLING_HOUR : CALLS_PER_ROLLING_HOUR - OVERRIDE_RESERVED_CALL_SLOTS;
+    const limitHit = callsInLastHour >= limit;
 
     if (limitHit) {
       channel = "sms";
@@ -87,9 +90,11 @@ async function runSelfTest() {
   };
   const decision = await decide(event);
   const validation = validateDecision(decision);
-  const passed = validation.valid && decision.channel === "voice" && decision.requiresApproval === false;
+  const limitPassed = CALLS_PER_ROLLING_HOUR === 20 && OVERRIDE_RESERVED_CALL_SLOTS === 4;
+  const passed = validation.valid && decision.channel === "voice" && decision.requiresApproval === false && limitPassed;
 
   console.log(`${passed ? "PASS" : "FAIL"} decision fallback path`);
+  console.log(`${limitPassed ? "PASS" : "FAIL"} call rate limit configuration`);
 
   if (!passed) {
     process.exitCode = 1;

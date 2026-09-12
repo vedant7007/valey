@@ -566,8 +566,8 @@ async function handleApproval(request, response, action) {
     const result = await executeApprovedAction(approval);
     await safeRecordResponse(approval.decisionId, result.ok ? "approved" : "ignored");
     sendJson(response, result.ok
-      ? { ok: true, executed: approval.action?.summary || "" }
-      : { ok: false, reason: result.reason || result.error?.message || "The action could not be executed." });
+      ? { ok: true, executed: approval.action?.summary || "", ...(result.reason ? { reason: result.reason } : {}) }
+      : { ok: false, reason: result.error?.message || result.reason || "The action could not be executed." });
   } catch (error) {
     console.error(`${action} handler failed: ${error.message}`);
     sendJson(response, { ok: false, reason: "Valey could not process that request." });
@@ -577,6 +577,7 @@ async function handleApproval(request, response, action) {
 // Same executors index.js dispatches to; its executeApprovedAction() is not exported.
 async function executeApprovedAction(approval, executors = {}) {
   const action = approval.action;
+  console.log(`Executing dashboard pending record: ${JSON.stringify(approval || null)}`);
   console.log(`Executing dashboard proposedAction: ${JSON.stringify(action || null)}`);
 
   const draft = executors.createDraft || createDraft;
@@ -592,7 +593,9 @@ async function executeApprovedAction(approval, executors = {}) {
   }
 
   if (action?.type === "alarm") {
-    return calendar(reminderEventPayload(action.payload || {}));
+    const reminder = reminderEventPayload(action);
+    const result = await calendar(reminder.payload);
+    return { ...result, ...(reminder.reason ? { reason: reminder.reason } : {}) };
   }
 
   if (action?.type === "message_reply") {
@@ -603,26 +606,86 @@ async function executeApprovedAction(approval, executors = {}) {
   return { ok: false, reason: `No executor for action type ${action?.type || "unknown"}` };
 }
 
-function reminderEventPayload(payload) {
-  const start = payload.datetime || payload.time || payload.start;
-  const startMs = Date.parse(start);
+function reminderEventPayload(action) {
+  const payload = normalizeObjectPayload(action?.payload);
+  const datetime = findAlarmDatetime(action);
+  let startMs = datetime.value === undefined ? NaN : Date.parse(datetime.value);
+  let reason = null;
 
-  if (!Number.isFinite(startMs)) {
-    return {
-      summary: payload.summary || "Valey reminder",
-      start,
-      end: payload.end,
-      description: payload.description,
-      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] }
-    };
+  if (Number.isFinite(startMs)) {
+    console.log(`Alarm datetime field found: ${datetime.field}`);
+  } else {
+    const fallback = fallbackAlarmDatetime(action);
+    startMs = fallback.startMs;
+    reason = fallback.reason;
+    console.log(`Alarm datetime field found: ${fallback.field}`);
   }
 
   return {
-    summary: payload.summary || "Valey reminder",
-    start: new Date(startMs).toISOString(),
-    end: payload.end || new Date(startMs + 15 * 60 * 1000).toISOString(),
-    description: payload.description || "Reminder created by Valey after approval.",
-    reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] }
+    payload: {
+      summary: payload.summary || action?.summary || "Valey reminder",
+      start: new Date(startMs).toISOString(),
+      end: payload.end || new Date(startMs + 15 * 60 * 1000).toISOString(),
+      description: payload.description || "Reminder created by Valey after approval.",
+      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] }
+    },
+    reason
+  };
+}
+
+function normalizeObjectPayload(payload) {
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+
+function findAlarmDatetime(action) {
+  const payload = action?.payload;
+
+  if (typeof payload === "string") {
+    return { field: "payload", value: payload };
+  }
+
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    for (const field of ["datetime", "when", "time", "start"]) {
+      if (payload[field]) {
+        return { field: `payload.${field}`, value: payload[field] };
+      }
+    }
+  }
+
+  for (const field of ["datetime", "when", "time", "start"]) {
+    if (action?.[field]) {
+      return { field, value: action[field] };
+    }
+  }
+
+  return { field: "missing", value: undefined };
+}
+
+function fallbackAlarmDatetime(action) {
+  const payload = normalizeObjectPayload(action?.payload);
+
+  for (const field of ["dueAt", "deadline", "dueDate", "statedDeadline"]) {
+    const value = payload[field] || action?.[field];
+    const dueMs = Date.parse(value);
+
+    if (Number.isFinite(dueMs)) {
+      const start = new Date(dueMs);
+      start.setUTCDate(start.getUTCDate() - 1);
+      start.setUTCHours(9, 0, 0, 0);
+      return {
+        field: payload[field] ? `payload.${field}` : field,
+        startMs: start.getTime(),
+        reason: `Reminder datetime was missing or invalid, so Valey defaulted to 09:00 the day before the stated deadline.`
+      };
+    }
+  }
+
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  tomorrow.setUTCHours(9, 0, 0, 0);
+  return {
+    field: "default",
+    startMs: tomorrow.getTime(),
+    reason: "Reminder datetime and deadline were missing or invalid, so Valey defaulted the reminder to tomorrow at 09:00."
   };
 }
 
@@ -1077,16 +1140,36 @@ async function runSelfTest() {
   const calendarApproval = await executeApprovedAction({
     action: { type: "calendar_event", payload: { summary: "Call", start: "2026-09-12T10:00:00.000Z", end: "2026-09-12T10:30:00.000Z" } }
   }, testExecutors);
-  const alarmApproval = await executeApprovedAction({
-    action: { type: "alarm", payload: { summary: "Pay bill", datetime: "2026-09-14T09:00:00.000Z" } }
+  const alarmInputs = [
+    { action: { type: "alarm", payload: { summary: "Pay bill", datetime: "2026-09-14T09:00:00.000Z" } } },
+    { action: { type: "alarm", payload: { summary: "Pay bill", when: "2026-09-14T10:00:00.000Z" } } },
+    { action: { type: "alarm", payload: { summary: "Pay bill", time: "2026-09-14T11:00:00.000Z" } } },
+    { action: { type: "alarm", payload: "2026-09-14T12:00:00.000Z" } }
+  ];
+  const alarmApprovals = [];
+
+  for (const approval of alarmInputs) {
+    alarmApprovals.push(await executeApprovedAction(approval, testExecutors));
+  }
+
+  const alarmFallback = await executeApprovedAction({
+    action: { type: "alarm", payload: { summary: "Pay bill", when: "later", dueAt: "2026-09-15T18:00:00.000Z" } }
   }, testExecutors);
   const messageApproval = await executeApprovedAction({ action: { type: "message_reply", payload: { text: "Approved." } } }, testExecutors);
   const unknown = await executeApprovedAction({ action: { type: "nope", payload: {} } }, testExecutors);
-  const executorPassed = emailApproval.ok && calendarApproval.ok && alarmApproval.ok && messageApproval.ok &&
-    executed.length === 4 &&
+  const alarmEvents = executed.filter(([type]) => type === "alarm");
+  const executorPassed = emailApproval.ok && calendarApproval.ok && alarmApprovals.every((result) => result.ok) &&
+    alarmFallback.ok && alarmFallback.reason?.includes("day before the stated deadline") && messageApproval.ok &&
+    executed.length === 8 &&
     executed.some(([type]) => type === "email_reply") &&
     executed.some(([type]) => type === "calendar_event") &&
-    executed.some(([type, payload]) => type === "alarm" && payload.reminders?.overrides?.[0]?.method === "popup") &&
+    alarmEvents.length === 5 &&
+    alarmEvents.every(([, payload]) => payload.reminders?.overrides?.[0]?.method === "popup") &&
+    alarmEvents.some(([, payload]) => payload.start === "2026-09-14T09:00:00.000Z") &&
+    alarmEvents.some(([, payload]) => payload.start === "2026-09-14T10:00:00.000Z") &&
+    alarmEvents.some(([, payload]) => payload.start === "2026-09-14T11:00:00.000Z") &&
+    alarmEvents.some(([, payload]) => payload.start === "2026-09-14T12:00:00.000Z") &&
+    alarmEvents.some(([, payload]) => payload.start === "2026-09-14T09:00:00.000Z" && payload.summary === "Pay bill") &&
     executed.some(([type, text]) => type === "message_reply" && text === "Approved.") &&
     unknown.ok === false && unknown.reason === "No executor for action type nope";
   const approvalPassed = parsed?.code === "a1" && rejectedForm === null && rejectedJunk === null &&
