@@ -1,7 +1,10 @@
+import { fileURLToPath } from "node:url";
+
 const SOURCES = new Set(["telegram", "discord", "gmail", "calendar"]);
 const TIERS = new Set(["critical", "high", "normal", "low"]);
 const CHANNELS = new Set(["call", "sms", "voice", "log"]);
 const ACTION_TYPES = new Set(["email_reply", "calendar_event", "message_reply", "alarm"]);
+const ISO_8601_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Canonical Event shape emitted by every inbound adapter:
@@ -97,6 +100,8 @@ export function normalizeEvent(partial) {
 
   if (!isIsoDate(event.receivedAt)) {
     errors.push("receivedAt must be a valid ISO 8601 string.");
+  } else {
+    event.receivedAt = new Date(event.receivedAt).toISOString();
   }
 
   if (!event.meta || typeof event.meta !== "object" || Array.isArray(event.meta)) {
@@ -180,5 +185,55 @@ function isIsoDate(value) {
   }
 
   const time = Date.parse(value);
-  return Number.isFinite(time) && new Date(time).toISOString() === value;
+  return Number.isFinite(time) && ISO_8601_DATE_TIME.test(value);
+}
+
+function runSelfTest() {
+  const base = {
+    source: "gmail",
+    sourceMessageId: "msg-1",
+    author: { id: "sender", displayName: "Sender" },
+    text: "Hello",
+    meta: {}
+  };
+
+  const cases = [
+    {
+      name: "accepts zulu timestamp without milliseconds",
+      event: { ...base, receivedAt: "2026-09-12T08:42:00Z" },
+      expected: "2026-09-12T08:42:00.000Z"
+    },
+    {
+      name: "accepts offset timestamp",
+      event: { ...base, receivedAt: "2026-09-12T14:12:00+05:30" },
+      expected: "2026-09-12T08:42:00.000Z"
+    }
+  ];
+
+  let failures = 0;
+
+  for (const testCase of cases) {
+    try {
+      const normalized = normalizeEvent(testCase.event);
+      const passed = normalized.receivedAt === testCase.expected;
+      console.log(`${passed ? "PASS" : "FAIL"} ${testCase.name}`);
+
+      if (!passed) {
+        failures += 1;
+        console.log(`  receivedAt: ${normalized.receivedAt}`);
+      }
+    } catch (error) {
+      failures += 1;
+      console.log(`FAIL ${testCase.name}`);
+      console.log(`  ${error.message}`);
+    }
+  }
+
+  if (failures > 0) {
+    process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runSelfTest();
 }
