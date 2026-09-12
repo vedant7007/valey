@@ -9,11 +9,13 @@
   --high: #FF6B4A;
   --normal: #5B8DEF;
   --low: #6B7280;
+  --quiet: #8A919C;
   --ok: #2EC27E;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --radius: 12px;
   --gutter: 16px;
+  --poll: 1500ms;
   color-scheme: dark;
 }
 
@@ -35,6 +37,12 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+button {
+  font: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
 .top,
 main {
   max-width: 760px;
@@ -43,6 +51,31 @@ main {
 
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* Poll pulse: a hairline that fills across each interval. */
+
+.pulse {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--muted);
+  opacity: 0.45;
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+}
+
+.pulse.run {
+  animation: fill var(--poll) linear forwards;
+}
+
+@keyframes fill {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }
 
 /* Header */
@@ -54,7 +87,8 @@ main {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   padding: calc(14px + env(safe-area-inset-top)) 0 14px;
   background: rgba(11, 12, 14, 0.86);
   -webkit-backdrop-filter: blur(14px);
@@ -66,6 +100,7 @@ main {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .wordmark {
@@ -92,10 +127,22 @@ main {
   background: var(--critical);
 }
 
+.last {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.last .num {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
 .adapters {
   margin: 0;
   font-size: 12px;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .adapters .num {
@@ -138,7 +185,8 @@ main {
 .stat-label,
 .section-title,
 .source,
-.meta-key {
+.meta-key,
+.last-key {
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.09em;
@@ -156,6 +204,7 @@ main {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  gap: 12px;
   margin: 30px 0 10px;
 }
 
@@ -164,10 +213,21 @@ main {
   font-size: 12px;
   letter-spacing: 0;
   text-transform: none;
+  white-space: nowrap;
 }
 
 .panel {
   margin-top: 26px;
+}
+
+.panel .section-title {
+  margin-top: 0;
+}
+
+.caption {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .list {
@@ -192,7 +252,6 @@ main {
   display: flex;
   gap: 2px;
   height: 8px;
-  padding: 0;
   border-radius: 999px;
   overflow: hidden;
   background: var(--surface);
@@ -241,6 +300,56 @@ main {
   height: 8px;
   border-radius: 2px;
   flex: none;
+}
+
+/* Sparkline */
+
+.spark {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.spark .stub { fill: var(--line-strong); }
+.spark .critical { fill: var(--critical); }
+.spark .high { fill: var(--high); }
+.spark .normal { fill: var(--normal); }
+.spark .low { fill: var(--low); }
+
+/* Source filter */
+
+.filters {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.filter {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.filter[aria-pressed="true"] {
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
 }
 
 /* Cards */
@@ -297,16 +406,12 @@ main {
   color: var(--muted);
 }
 
-.card-foot .sep {
-  color: var(--line-strong);
-}
-
 .card-foot .response {
   margin-left: auto;
   color: var(--text);
 }
 
-/* Tier chip: one accent per card, carried by the chip alone. */
+/* Tier chip: one accent per card, carried by the chip and the arrival outline only. */
 
 .chip {
   display: inline-flex;
@@ -334,7 +439,12 @@ main {
 .chip.critical { --chip: var(--critical); }
 .chip.high { --chip: var(--high); }
 .chip.normal { --chip: var(--normal); }
-.chip.low, .chip.withheld { --chip: #8A919C; }
+.chip.low, .chip.withheld { --chip: var(--quiet); }
+
+.card.tier-critical { --flash: var(--critical); }
+.card.tier-high { --flash: var(--high); }
+.card.tier-normal { --flash: var(--normal); }
+.card.tier-low, .card.withheld { --flash: var(--quiet); }
 
 @supports not (background: color-mix(in srgb, red 10%, transparent)) {
   .chip {
@@ -370,6 +480,48 @@ main {
 
 .approval .remaining {
   font-family: var(--mono);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.btn {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval[aria-busy="true"] .btn:disabled {
+  opacity: 0.7;
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--high);
+  overflow-wrap: anywhere;
 }
 
 /* Withheld: the one deliberately closed surface on the page. */
@@ -425,9 +577,27 @@ main {
   animation: enter 200ms ease-out both;
 }
 
+.flash {
+  animation: enter 200ms ease-out both, flash 600ms ease-out both;
+}
+
+.leave {
+  animation: leave 200ms ease-in forwards;
+  pointer-events: none;
+}
+
 @keyframes enter {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
+}
+
+@keyframes flash {
+  0%, 35% { box-shadow: 0 0 0 1.5px var(--flash, var(--quiet)); }
+  100% { box-shadow: 0 0 0 1.5px transparent; }
+}
+
+@keyframes leave {
+  to { opacity: 0; transform: translateY(-6px); }
 }
 
 @keyframes pulse {
@@ -437,8 +607,15 @@ main {
 
 @media (prefers-reduced-motion: reduce) {
   .enter,
+  .flash,
+  .leave,
+  .pulse.run,
   .dot[data-state="ok"] {
     animation: none;
+  }
+
+  .pulse {
+    display: none;
   }
 
   .seg {

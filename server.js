@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { appendCallTurn, getActiveCall, setCallPendingAction } from "./core/active-calls.js";
@@ -19,6 +20,8 @@ const MAX_CALL_EXCHANGES = 5;
 const PUBLIC_DIR = fileURLToPath(new URL("./public/", import.meta.url));
 const STATE_DIR = path.resolve(process.env.VALEY_STATE_DIR || "state");
 const MAX_DASHBOARD_DECISIONS = 50;
+const MAX_JSON_BODY_BYTES = 4096;
+const APPROVAL_CODE = /^A\d{1,2}$/;
 const STATIC_FILES = {
   "/": ["index.html", "text/html; charset=utf-8"],
   "/app.css": ["app.css", "text/css; charset=utf-8"],
@@ -28,9 +31,9 @@ const ADAPTER_ENV = {
   gmail: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
   calendar: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
   telegram: ["TELEGRAM_BOT_TOKEN"],
-  discord: ["DISCORD_BOT_TOKEN"],
-  twilio: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"]
+  discord: ["DISCORD_BOT_TOKEN"]
 };
+const TIMELINE_LENGTH = 20;
 
 function twiml(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${body}</Response>`;
@@ -491,6 +494,89 @@ async function handleState(response) {
   response.end(JSON.stringify(state));
 }
 
+// ponytail: index.js and this process both read-modify-write pending.json; move to one writer if approvals ever collide.
+async function handleApproval(request, response, action) {
+  try {
+    const body = await readJsonBody(request);
+    const code = String(body?.code || "").trim().toUpperCase();
+
+    if (!body || !APPROVAL_CODE.test(code)) {
+      sendJson(response, { ok: false, reason: "Send a JSON body with a valid approval code." });
+      return;
+    }
+
+    // consumePendingApproval() drops expired records and removes this one, so nothing can run twice.
+    const approval = await consumePendingApproval(code);
+
+    if (!approval) {
+      sendJson(response, { ok: false, reason: `${code} is not pending. It may have expired or already been handled.` });
+      return;
+    }
+
+    if (action === "decline") {
+      await safeRecordResponse(approval.decisionId, "rejected");
+      sendJson(response, { ok: true });
+      return;
+    }
+
+    const result = await executeApprovedAction(approval);
+    await safeRecordResponse(approval.decisionId, result.ok ? "approved" : "ignored");
+    sendJson(response, result.ok
+      ? { ok: true, executed: approval.action?.summary || "" }
+      : { ok: false, reason: result.error?.message || "The action could not be executed." });
+  } catch (error) {
+    console.error(`${action} handler failed: ${error.message}`);
+    sendJson(response, { ok: false, reason: "Valey could not process that request." });
+  }
+}
+
+// Same executors index.js dispatches to; its executeApprovedAction() is not exported.
+async function executeApprovedAction(approval) {
+  const action = approval.action;
+
+  if (action?.type === "email_reply") {
+    return createDraft(action.payload || {});
+  }
+
+  if (action?.type === "calendar_event") {
+    return createEvent(action.payload || {});
+  }
+
+  return { ok: false, error: { message: `No executor is available for ${action?.type || "this action"}.` } };
+}
+
+// JSON-only bodies: a cross-site HTML form cannot produce one, and a cross-origin fetch fails preflight.
+async function readJsonBody(request) {
+  if (!/^application\/json\b/i.test(request.headers["content-type"] || "")) {
+    return null;
+  }
+
+  const chunks = [];
+  let size = 0;
+
+  for await (const chunk of request) {
+    size += chunk.length;
+
+    if (size > MAX_JSON_BODY_BYTES) {
+      return null;
+    }
+
+    chunks.push(chunk);
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function sendJson(response, body) {
+  response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(JSON.stringify(body));
+}
+
 async function buildDashboardState() {
   const log = await readStateJson("decisions.json", []);
   const pending = await readStateJson("pending.json", {});
@@ -507,9 +593,16 @@ function summarize(rawLog, pendingMap) {
 
   return {
     decisions: log.slice(-MAX_DASHBOARD_DECISIONS).reverse().map(publicDecision),
+    timeline: log.slice(-TIMELINE_LENGTH).map((entry) => ({
+      timestamp: entry.recordedAt,
+      tier: entry.tier,
+      source: entry.source,
+      channel: entry.channel
+    })),
     pending,
     stats: {
       total: log.length,
+      avgResponseSeconds: averageResponseSeconds(log),
       critical: count((entry) => entry.tier === "critical"),
       high: count((entry) => entry.tier === "high"),
       normal: count((entry) => entry.tier === "normal"),
@@ -533,6 +626,16 @@ function summarize(rawLog, pendingMap) {
       active: names.every((envName) => Boolean(process.env[envName]))
     }))
   };
+}
+
+// Mean seconds from a decision being recorded to the user answering it; null until someone has answered.
+function averageResponseSeconds(log) {
+  const durations = log
+    .filter((entry) => entry.response && entry.responseAt)
+    .map((entry) => (Date.parse(entry.responseAt) - Date.parse(entry.recordedAt)) / 1000)
+    .filter((seconds) => Number.isFinite(seconds) && seconds >= 0);
+
+  return durations.length ? Math.round(durations.reduce((sum, seconds) => sum + seconds, 0) / durations.length) : null;
 }
 
 // Withheld entries never leave the server with any text attached, redacted or not.
@@ -561,6 +664,11 @@ export function createServer() {
 
     if (request.method === "GET" && query.pathname === "/api/state") {
       await handleState(response);
+      return;
+    }
+
+    if (request.method === "POST" && (query.pathname === "/api/approve" || query.pathname === "/api/decline")) {
+      await handleApproval(request, response, query.pathname.slice(5));
       return;
     }
 
@@ -645,7 +753,29 @@ async function runSelfTest() {
     state.decisions[0].redactedText === undefined && Array.isArray(summarize([], {}).decisions);
   console.log(`${statePassed ? "PASS" : "FAIL"} dashboard state`);
 
-  if (!passed || !endIntentPassed || !capPassed || !statePassed) {
+  const timed = summarize(
+    [
+      { tier: "high", channel: "sms", source: "gmail", recordedAt: "2026-09-12T10:00:00.000Z", response: "approved", responseAt: "2026-09-12T10:00:30.000Z" },
+      { tier: "low", channel: "log", source: "discord", recordedAt: "2026-09-12T10:01:00.000Z", response: "rejected", responseAt: "2026-09-12T10:02:30.000Z" },
+      { tier: "normal", channel: "voice", source: "telegram", recordedAt: "2026-09-12T10:03:00.000Z", response: null, responseAt: null }
+    ],
+    {}
+  );
+  const timelinePassed = timed.stats.avgResponseSeconds === 60 && summarize([], {}).stats.avgResponseSeconds === null &&
+    timed.timeline.length === 3 && timed.timeline[0].timestamp === "2026-09-12T10:00:00.000Z" &&
+    Object.keys(timed.timeline[2]).join() === "timestamp,tier,source,channel";
+  console.log(`${timelinePassed ? "PASS" : "FAIL"} dashboard timeline`);
+
+  const fakeRequest = (contentType, text) => Object.assign(Readable.from([Buffer.from(text)]), { headers: { "content-type": contentType } });
+  const parsed = await readJsonBody(fakeRequest("application/json", '{"code":"a1"}'));
+  const rejectedForm = await readJsonBody(fakeRequest("application/x-www-form-urlencoded", "code=A1"));
+  const rejectedJunk = await readJsonBody(fakeRequest("application/json", "{nope"));
+  const unknown = await executeApprovedAction({ action: { type: "alarm", payload: {} } });
+  const approvalPassed = parsed?.code === "a1" && rejectedForm === null && rejectedJunk === null &&
+    unknown.ok === false && APPROVAL_CODE.test("A12") && !APPROVAL_CODE.test("A123") && !APPROVAL_CODE.test("");
+  console.log(`${approvalPassed ? "PASS" : "FAIL"} approval endpoint guards`);
+
+  if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed) {
     process.exitCode = 1;
   }
 }

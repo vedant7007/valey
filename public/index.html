@@ -9,14 +9,15 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+  <div class="pulse" id="pulse" aria-hidden="true"></div>
+
   <header class="top">
     <div class="brand">
       <span class="dot" id="status-dot" aria-hidden="true"></span>
       <h1 class="wordmark">Valey</h1>
+      <span class="last"><span class="last-key">Last event</span> <span class="num" id="last-event">none yet</span></span>
     </div>
-    <p class="adapters" id="adapters" aria-live="polite">
-      <span class="num" data-adapters>&ndash;</span> <span data-adapters-label>adapters active</span>
-    </p>
+    <p class="adapters"><span class="num" data-adapters>&ndash;</span> <span data-adapters-label>adapters active</span></p>
   </header>
 
   <main>
@@ -55,6 +56,12 @@
       </ul>
     </section>
 
+    <section class="panel" aria-labelledby="spark-title">
+      <h2 class="section-title" id="spark-title">Recent activity <span class="count" id="avg-response"></span></h2>
+      <svg class="spark" id="spark" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="No events yet"></svg>
+      <p class="caption">Last 20 events, oldest to newest. Height is urgency.</p>
+    </section>
+
     <section aria-labelledby="pending-title">
       <h2 class="section-title" id="pending-title">Awaiting approval <span class="count num" id="pending-count"></span></h2>
       <div class="list" id="pending">
@@ -64,6 +71,13 @@
 
     <section aria-labelledby="feed-title">
       <h2 class="section-title" id="feed-title">Activity <span class="count num" id="feed-count"></span></h2>
+      <div class="filters" id="filters" role="group" aria-label="Filter by source">
+        <button type="button" class="filter" data-source="" aria-pressed="true">All</button>
+        <button type="button" class="filter" data-source="gmail" aria-pressed="false">Gmail</button>
+        <button type="button" class="filter" data-source="telegram" aria-pressed="false">Telegram</button>
+        <button type="button" class="filter" data-source="discord" aria-pressed="false">Discord</button>
+        <button type="button" class="filter" data-source="calendar" aria-pressed="false">Calendar</button>
+      </div>
       <div class="list" id="feed">
         <p class="empty">No decisions recorded yet.</p>
       </div>
