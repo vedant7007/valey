@@ -627,6 +627,15 @@ async function runSelfTest() {
     !safeSpokenText("Email person@example.test and read 1234567890 now").includes("1234567890");
   console.log(`${spokenSafetyPassed ? "PASS" : "FAIL"} voice spoken safety`);
 
+  const modelInputSafety = redactCallContext({
+    body: "Wire payment OTP 123456",
+    note: "Meet me at https://example.test and email person@example.test"
+  });
+  const modelInputSafetyPassed = modelInputSafety.body === "[WITHHELD]" &&
+    safeSpokenText(modelInputSafety.note).includes("a link") &&
+    !safeSpokenText(modelInputSafety.note).includes("person@example.test");
+  console.log(`${modelInputSafetyPassed ? "PASS" : "FAIL"} voice model input safety`);
+
   const state = summarize(
     [{ tier: "critical", channel: "call", source: "gmail", category: "financial", redactedText: "secret", response: "approved" }, null],
     { A1: { code: "A1", action: { type: "email_reply", summary: "Reply", payload: { to: "x" } }, expiresAt: new Date(Date.now() + 60000).toISOString() }, A2: { code: "A2", expiresAt: "2000-01-01T00:00:00.000Z" } }
