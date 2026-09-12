@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import twilio from "twilio";
+import { recordActiveCall } from "../../core/active-calls.js";
 
 const MAX_SPOKEN_CHARS = 300;
 const DEFAULT_SPOKEN_TEXT = "Valey found an urgent item that needs your attention.";
@@ -11,18 +12,19 @@ export async function placeCall(spokenText) {
     return config;
   }
 
-  const twiml = buildTwiML(spokenText);
-  console.log("Twilio call TwiML:");
-  console.log(twiml);
+  const briefing = normalizeSpokenText(spokenText);
+  const voiceUrl = new URL("/voice", config.publicUrl).toString();
+  console.log(`Twilio call webhook: ${voiceUrl}`);
 
   try {
     const client = twilio(config.accountSid, config.authToken);
     const call = await client.calls.create({
       to: config.userPhoneNumber,
       from: config.twilioPhoneNumber,
-      twiml
+      url: voiceUrl
     });
 
+    await recordActiveCall(call.sid, briefing, { channel: "call" });
     console.log(`Twilio call created: sid=${call.sid} status=${call.status}`);
     return { ok: true };
   } catch (error) {
@@ -39,24 +41,38 @@ function getTwilioConfig() {
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
   const userPhoneNumber = process.env.USER_PHONE_NUMBER;
+  const publicUrl = process.env.PUBLIC_URL;
 
-  if (!accountSid || !authToken || !twilioPhoneNumber || !userPhoneNumber) {
+  if (!accountSid || !authToken || !twilioPhoneNumber || !userPhoneNumber || !publicUrl) {
     return {
       ok: false,
       error: {
         message: "Missing Twilio call environment variables.",
-        missing: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "USER_PHONE_NUMBER"].filter((name) => !process.env[name])
+        missing: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "USER_PHONE_NUMBER", "PUBLIC_URL"].filter((name) => !process.env[name])
       }
     };
   }
 
-  return { ok: true, accountSid, authToken, twilioPhoneNumber, userPhoneNumber };
+  try {
+    const parsed = new URL(publicUrl);
+
+    if (parsed.protocol !== "https:") {
+      return { ok: false, error: { message: "PUBLIC_URL must be an https URL reachable by Twilio." } };
+    }
+  } catch {
+    return { ok: false, error: { message: "PUBLIC_URL must be a valid https URL reachable by Twilio." } };
+  }
+
+  return { ok: true, accountSid, authToken, twilioPhoneNumber, userPhoneNumber, publicUrl };
 }
 
 export function buildTwiML(spokenText) {
-  const script = capText(spokenText, MAX_SPOKEN_CHARS);
-  const escaped = escapeXml(script).trim() || DEFAULT_SPOKEN_TEXT;
+  const escaped = escapeXml(normalizeSpokenText(spokenText));
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Say voice="alice">${escaped}</Say></Response>`;
+}
+
+function normalizeSpokenText(text) {
+  return capText(text, MAX_SPOKEN_CHARS) || DEFAULT_SPOKEN_TEXT;
 }
 
 function capText(text, maxLength) {

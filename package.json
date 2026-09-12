@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "auth:google": "node scripts/auth-google.js"
+    "auth:google": "node scripts/auth-google.js",
+    "server": "node server.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
