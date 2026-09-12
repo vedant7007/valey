@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { redact } from "./redact.js";
 
 const MAX_ENTRIES = 500;
+const MAX_REDACTED_TEXT_CHARS = 200;
 const STATE_DIR = path.resolve(process.env.VALEY_STATE_DIR || "state");
 const DECISIONS_FILE = path.join(STATE_DIR, "decisions.json");
 const RESPONSES = new Set(["approved", "rejected", "ignored"]);
@@ -12,11 +13,9 @@ export async function recordDecision(event, decision) {
   const log = await readDecisionLog();
   const entry = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    eventId: decision.eventId,
     source: event.source,
-    receivedAt: event.receivedAt,
     recordedAt: new Date().toISOString(),
-    redactedText: redact(event.text).clean,
+    redactedText: redact(event.text).clean.slice(0, MAX_REDACTED_TEXT_CHARS),
     tier: decision.tier,
     reason: decision.reason,
     channel: decision.channel,
@@ -110,7 +109,8 @@ async function runSelfTest() {
   const dismissals = await getDismissalCount("deadline");
   const calls = await getCallsInLastHour();
   const redacted = !recent[0].redactedText.includes("user@example.test") && !recent[0].redactedText.includes("123456");
-  const passed = response.ok && dismissals >= 1 && calls >= 1 && redacted;
+  const compact = recent[0].redactedText.length <= MAX_REDACTED_TEXT_CHARS && recent[0].eventId === undefined && recent[0].receivedAt === undefined;
+  const passed = response.ok && dismissals >= 1 && calls >= 1 && redacted && compact;
 
   console.log(`${passed ? "PASS" : "FAIL"} memory json store`);
 

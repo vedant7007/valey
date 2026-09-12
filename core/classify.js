@@ -6,6 +6,7 @@ import { isFinancial, redact } from "./redact.js";
 const DEFAULT_MODEL = "openai/gpt-4o-mini";
 const TIERS = new Set(["critical", "high", "normal", "low"]);
 const ACTION_TYPES = new Set(["email_reply", "calendar_event", "message_reply", "alarm"]);
+const MARKETING_PATTERN = /\b(newsletter|digest|unsubscribe|promotion|promotional|product announcement|new feature|limited offer|sale|deal|webinar|launch event|marketing)\b/i;
 
 export async function classify(event) {
   const redacted = redact(event.text);
@@ -17,6 +18,15 @@ export async function classify(event) {
       category: "financial",
       suggestedAction: null,
       channelIntent: "log"
+    };
+  }
+
+  if (isMarketing(event.text, event.meta)) {
+    return {
+      tier: "low",
+      reason: "Marketing, newsletter, announcement, or digest content is low priority even when it uses urgency words.",
+      category: "marketing",
+      suggestedAction: null
     };
   }
 
@@ -46,7 +56,9 @@ export async function classify(event) {
             "You classify Valey events and return strict JSON only.",
             "No prose. No markdown fences.",
             "Tiers:",
-            "critical = a hard deadline inside 24 hours, an emergency, a security or access problem, or something with real cost if missed.",
+            "critical = a hard deadline inside 24 hours that the user personally must act on, an emergency, or a security or access problem.",
+            "Marketing language, product announcements, newsletters, and automated digests are never critical regardless of urgent-sounding wording.",
+            "Urgency words in marketing copy are not urgency.",
             "high = needs a reply today, a scheduling request, or a blocked person waiting.",
             "normal = useful to know, no time pressure.",
             "low = newsletters, automated notices, social chatter.",
@@ -83,6 +95,11 @@ export async function classify(event) {
       suggestedAction: null
     };
   }
+}
+
+function isMarketing(text, meta = {}) {
+  const value = `${text || ""}\n${meta?.subject || ""}\n${(meta?.labelIds || []).join(" ")}`;
+  return MARKETING_PATTERN.test(value) || /\bCATEGORY_PROMOTIONS\b/i.test(value);
 }
 
 function normalizeModelResult(content) {
@@ -133,6 +150,7 @@ function stripFences(content) {
 }
 
 async function runSelfTest() {
+  const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const financial = await classify({
     id: "gmail:msg-1",
     source: "gmail",
@@ -141,6 +159,7 @@ async function runSelfTest() {
     text: "Security alert: payment OTP 123456",
     receivedAt: "2026-09-12T08:42:00.000Z"
   });
+  delete process.env.OPENROUTER_API_KEY;
   const noKey = await classify({
     id: "gmail:msg-2",
     source: "gmail",
@@ -149,9 +168,40 @@ async function runSelfTest() {
     text: "Can you review this when free?",
     receivedAt: "2026-09-12T08:42:00.000Z"
   });
-  const passed = financial.tier === "low" && financial.channelIntent === "log" && noKey.tier === "normal";
+  if (originalOpenRouterKey === undefined) {
+    delete process.env.OPENROUTER_API_KEY;
+  } else {
+    process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
+  }
+  const newsletterLiveToday = await classify({
+    id: "gmail:msg-3",
+    source: "gmail",
+    threadId: null,
+    author: { displayName: "Newsletter" },
+    text: "Weekly newsletter: our demo is live today with a product announcement.",
+    receivedAt: "2026-09-12T08:42:00.000Z",
+    meta: { subject: "Weekly newsletter" }
+  });
+  const newsletterNeverRunOut = await classify({
+    id: "gmail:msg-4",
+    source: "gmail",
+    threadId: null,
+    author: { displayName: "Promo Team" },
+    text: "Promotional digest: never run out of credits with our new feature.",
+    receivedAt: "2026-09-12T08:42:00.000Z",
+    meta: { labelIds: ["CATEGORY_PROMOTIONS"] }
+  });
+  const cases = [
+    ["financial content withheld", financial.tier === "low" && financial.channelIntent === "log"],
+    ["missing key fallback", noKey.tier === "normal"],
+    ["newsletter live today is low", newsletterLiveToday.tier === "low"],
+    ["newsletter never run out is low", newsletterNeverRunOut.tier === "low"]
+  ];
+  const passed = cases.every(([, ok]) => ok);
 
-  console.log(`${passed ? "PASS" : "FAIL"} classifier safeguards`);
+  for (const [name, ok] of cases) {
+    console.log(`${ok ? "PASS" : "FAIL"} ${name}`);
+  }
 
   if (!passed) {
     process.exitCode = 1;
