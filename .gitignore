@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+node_modules/
+state/
+tokens/
+.codex/
+*credentials*.json
+*client_secret*.json
+tmp/
+*.ogg
+*.mp3
