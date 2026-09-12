@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -34,6 +34,9 @@ const ADAPTER_ENV = {
   discord: ["DISCORD_BOT_TOKEN"]
 };
 const TIMELINE_LENGTH = 20;
+const CLEAR_SCOPES = new Set(["all", "low"]);
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_SUMMARY_WORDS = 120;
 
 function twiml(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${body}</Response>`;
@@ -564,7 +567,7 @@ async function handleApproval(request, response, action) {
     await safeRecordResponse(approval.decisionId, result.ok ? "approved" : "ignored");
     sendJson(response, result.ok
       ? { ok: true, executed: approval.action?.summary || "" }
-      : { ok: false, reason: result.error?.message || "The action could not be executed." });
+      : { ok: false, reason: result.reason || result.error?.message || "The action could not be executed." });
   } catch (error) {
     console.error(`${action} handler failed: ${error.message}`);
     sendJson(response, { ok: false, reason: "Valey could not process that request." });
@@ -572,18 +575,55 @@ async function handleApproval(request, response, action) {
 }
 
 // Same executors index.js dispatches to; its executeApprovedAction() is not exported.
-async function executeApprovedAction(approval) {
+async function executeApprovedAction(approval, executors = {}) {
   const action = approval.action;
+  console.log(`Executing dashboard proposedAction: ${JSON.stringify(action || null)}`);
+
+  const draft = executors.createDraft || createDraft;
+  const calendar = executors.createEvent || createEvent;
+  const telegram = executors.sendTelegramMessage || sendTelegramMessage;
 
   if (action?.type === "email_reply") {
-    return createDraft(action.payload || {});
+    return draft(action.payload || {});
   }
 
   if (action?.type === "calendar_event") {
-    return createEvent(action.payload || {});
+    return calendar(action.payload || {});
   }
 
-  return { ok: false, error: { message: `No executor is available for ${action?.type || "this action"}.` } };
+  if (action?.type === "alarm") {
+    return calendar(reminderEventPayload(action.payload || {}));
+  }
+
+  if (action?.type === "message_reply") {
+    const payload = action.payload || {};
+    return telegram(payload.text || payload.body || payload.message || "");
+  }
+
+  return { ok: false, reason: `No executor for action type ${action?.type || "unknown"}` };
+}
+
+function reminderEventPayload(payload) {
+  const start = payload.datetime || payload.time || payload.start;
+  const startMs = Date.parse(start);
+
+  if (!Number.isFinite(startMs)) {
+    return {
+      summary: payload.summary || "Valey reminder",
+      start,
+      end: payload.end,
+      description: payload.description,
+      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] }
+    };
+  }
+
+  return {
+    summary: payload.summary || "Valey reminder",
+    start: new Date(startMs).toISOString(),
+    end: payload.end || new Date(startMs + 15 * 60 * 1000).toISOString(),
+    description: payload.description || "Reminder created by Valey after approval.",
+    reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] }
+  };
 }
 
 // JSON-only bodies: a cross-site HTML form cannot produce one, and a cross-origin fetch fails preflight.
@@ -618,6 +658,190 @@ function sendJson(response, body) {
   response.end(JSON.stringify(body));
 }
 
+// Clearing archives first, then rewrites. Marker entries are the ledger and survive every clear.
+async function handleClearLog(request, response) {
+  try {
+    const body = await readJsonBody(request);
+    const scope = String(body?.scope || "");
+
+    if (!body || !CLEAR_SCOPES.has(scope)) {
+      sendJson(response, { ok: false, reason: "Send a JSON body with scope 'all' or 'low'." });
+      return;
+    }
+
+    const log = await readStateJson("decisions.json", []);
+    const archivedTo = await archiveDecisions();
+    const { kept, removed } = partitionLog(log, scope);
+    const marker = clearMarker(scope, removed, archivedTo);
+    await writeDecisions([...kept, marker]);
+    sendJson(response, { ok: true, removed, archivedTo });
+  } catch (error) {
+    console.error(`Clear log failed: ${error.message}`);
+    sendJson(response, { ok: false, reason: "Valey could not clear the log. Nothing was changed." });
+  }
+}
+
+// Moves the live file aside untouched, malformed or not; returns null when there is nothing to archive.
+async function archiveDecisions() {
+  const source = path.join(STATE_DIR, "decisions.json");
+  const archiveDir = path.join(STATE_DIR, "archive");
+  const target = path.join(archiveDir, `decisions-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+
+  try {
+    await mkdir(archiveDir, { recursive: true });
+    await rename(source, target);
+    return path.relative(process.cwd(), target).split(path.sep).join("/");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function partitionLog(log, scope) {
+  const entries = log.filter((entry) => entry && typeof entry === "object");
+  const kept = entries.filter((entry) => isMarker(entry) || (scope === "low" && entry.tier !== "low"));
+  return { kept, removed: entries.length - kept.length };
+}
+
+function clearMarker(scope, removed, archivedTo) {
+  return {
+    id: `clear-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    kind: "marker",
+    source: "system",
+    recordedAt: new Date().toISOString(),
+    tier: null,
+    channel: null,
+    category: "log-cleared",
+    reason: scope === "low" ? "Low priority entries cleared." : "Activity log cleared.",
+    scope,
+    removed,
+    archivedTo,
+    response: null,
+    responseAt: null
+  };
+}
+
+function isMarker(entry) {
+  return entry?.kind === "marker";
+}
+
+async function writeDecisions(log) {
+  await mkdir(STATE_DIR, { recursive: true });
+  const tempFile = path.join(STATE_DIR, `decisions.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(tempFile, `${JSON.stringify(log, null, 2)}\n`, "utf8");
+  await rename(tempFile, path.join(STATE_DIR, "decisions.json"));
+}
+
+async function handleSummary(response) {
+  try {
+    sendJson(response, await buildSummary());
+  } catch (error) {
+    console.error(`Summary failed: ${error.message}`);
+    sendJson(response, { ...buildSummaryFrom([], {}), degraded: true });
+  }
+}
+
+async function handleSummarySpeak(response) {
+  try {
+    const summary = await buildSummary();
+    const voice = await import("./adapters/out/voice.js");
+    const result = await voice.sendVoiceNote(summary.text);
+    sendJson(response, result.ok
+      ? { ok: true, degraded: Boolean(result.degraded) }
+      : { ok: false, degraded: false, reason: result.error || "The voice note could not be sent." });
+  } catch (error) {
+    console.error(`Summary speak failed: ${error.message}`);
+    sendJson(response, { ok: false, degraded: false, reason: "Valey could not send the summary." });
+  }
+}
+
+async function buildSummary() {
+  const log = await readStateJson("decisions.json", []);
+  const pending = await readStateJson("pending.json", {});
+  return buildSummaryFrom(log, pending);
+}
+
+// Plain-language digest of the last 24 hours built from stored reason fields only.
+// Withheld items are counted and never described.
+function buildSummaryFrom(rawLog, pendingMap, now = Date.now()) {
+  const since = now - DAY_MS;
+  const recent = rawLog.filter((entry) => entry && typeof entry === "object" && !isMarker(entry) && Date.parse(entry.recordedAt) >= since);
+  const spoken = recent.filter((entry) => entry.category !== "financial");
+  const pending = Object.values(pendingMap).filter((item) => item && Date.parse(item.expiresAt) > now);
+  const today = new Date(now).toDateString();
+  const dueToday = spoken.filter((entry) => entry.source === "calendar" && new Date(Date.parse(entry.recordedAt)).toDateString() === today).reverse();
+  const tally = (tier) => recent.filter((entry) => entry.tier === tier).length;
+  const counts = {
+    handled: recent.length,
+    critical: tally("critical"),
+    high: tally("high"),
+    normal: tally("normal"),
+    low: tally("low"),
+    withheld: recent.length - spoken.length,
+    awaitingApproval: pending.length,
+    dueToday: dueToday.length
+  };
+  const attention = spoken.filter((entry) => entry.tier === "critical" || entry.tier === "high").reverse();
+  const sentences = [];
+  const say = (priority, text) => sentences.push({ priority, text });
+
+  if (!recent.length) {
+    say(0, "Valey has not recorded any events in the last 24 hours.");
+  } else {
+    say(0, `In the last 24 hours Valey handled ${plural(recent.length, "event")}: ${counts.critical} critical, ${counts.high} high, ${counts.normal} normal and ${counts.low} low.`);
+  }
+
+  if (attention.length) {
+    say(4, `${plural(attention.length, "item")} needed attention: ${listReasons(attention, 3)}`);
+  }
+
+  if (counts.withheld) {
+    say(1, `${plural(counts.withheld, "item")} ${counts.withheld === 1 ? "was" : "were"} withheld as financial or one-time-code material.`);
+  }
+
+  if (pending.length) {
+    say(2, `${plural(pending.length, "action")} ${pending.length === 1 ? "is" : "are"} awaiting your approval: ${listReasons(pending.map((item) => ({ reason: item.action?.summary })), 3)}`);
+  } else if (recent.length) {
+    say(2, "Nothing is awaiting your approval.");
+  }
+
+  if (dueToday.length) {
+    say(3, `Due today: ${listReasons(dueToday, 2)}`);
+  }
+
+  return { text: fitWords(sentences, MAX_SUMMARY_WORDS), generatedAt: new Date(now).toISOString(), counts };
+}
+
+function listReasons(entries, limit) {
+  const items = entries
+    .map((entry) => String(entry.reason || "").replace(/\s+/g, " ").trim().replace(/[.;]+$/, ""))
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((reason) => reason.length > 90 ? `${reason.slice(0, 87).trimEnd()}...` : reason);
+  const more = entries.length - items.length;
+  return `${items.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`;
+}
+
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+// Drops the least important sentence until the digest fits, keeping reading order; the headline always stays.
+function fitWords(sentences, limit) {
+  const kept = sentences.slice();
+  const words = () => kept.map((item) => item.text).join(" ").split(/\s+/).length;
+
+  while (kept.length > 1 && words() > limit) {
+    const lowest = kept.reduce((worst, item, index) => (item.priority > kept[worst].priority ? index : worst), 0);
+    kept.splice(lowest, 1);
+  }
+
+  return kept.map((item) => item.text).join(" ");
+}
+
 async function buildDashboardState() {
   const log = await readStateJson("decisions.json", []);
   const pending = await readStateJson("pending.json", {});
@@ -626,14 +850,17 @@ async function buildDashboardState() {
 
 function summarize(rawLog, pendingMap) {
   const now = Date.now();
-  const log = rawLog.filter((entry) => entry && typeof entry === "object");
+  const entries = rawLog.filter((entry) => entry && typeof entry === "object");
+  const log = entries.filter((entry) => !isMarker(entry));
+  const markers = entries.filter(isMarker);
   const count = (predicate) => log.filter(predicate).length;
   const pending = Object.values(pendingMap)
     .filter((item) => item && Date.parse(item.expiresAt) > now)
     .map((item) => ({ ...item, action: { type: item.action?.type, summary: item.action?.summary } }));
 
   return {
-    decisions: log.slice(-MAX_DASHBOARD_DECISIONS).reverse().map(publicDecision),
+    // Ledger markers always trail the events so they sit at the bottom of the feed.
+    decisions: log.slice(-MAX_DASHBOARD_DECISIONS).reverse().map(publicDecision).concat(markers.slice().reverse()),
     timeline: log.slice(-TIMELINE_LENGTH).map((entry) => ({
       timestamp: entry.recordedAt,
       tier: entry.tier,
@@ -643,6 +870,7 @@ function summarize(rawLog, pendingMap) {
     pending,
     stats: {
       total: log.length,
+      last24h: count((entry) => Date.parse(entry.recordedAt) >= now - DAY_MS),
       avgResponseSeconds: averageResponseSeconds(log),
       critical: count((entry) => entry.tier === "critical"),
       high: count((entry) => entry.tier === "high"),
@@ -710,6 +938,21 @@ export function createServer() {
 
     if (request.method === "POST" && (query.pathname === "/api/approve" || query.pathname === "/api/decline")) {
       await handleApproval(request, response, query.pathname.slice(5));
+      return;
+    }
+
+    if (request.method === "POST" && query.pathname === "/api/clear-log") {
+      await handleClearLog(request, response);
+      return;
+    }
+
+    if (request.method === "GET" && query.pathname === "/api/summary") {
+      await handleSummary(response);
+      return;
+    }
+
+    if (request.method === "POST" && query.pathname === "/api/summary/speak") {
+      await handleSummarySpeak(response);
       return;
     }
 
@@ -815,12 +1058,65 @@ async function runSelfTest() {
   const parsed = await readJsonBody(fakeRequest("application/json", '{"code":"a1"}'));
   const rejectedForm = await readJsonBody(fakeRequest("application/x-www-form-urlencoded", "code=A1"));
   const rejectedJunk = await readJsonBody(fakeRequest("application/json", "{nope"));
-  const unknown = await executeApprovedAction({ action: { type: "alarm", payload: {} } });
+  const executed = [];
+  const testExecutors = {
+    createDraft: async (payload) => {
+      executed.push(["email_reply", payload]);
+      return { ok: true, draftId: "draft-test" };
+    },
+    createEvent: async (payload) => {
+      executed.push([payload.reminders ? "alarm" : "calendar_event", payload]);
+      return { ok: true, eventId: "event-test" };
+    },
+    sendTelegramMessage: async (text) => {
+      executed.push(["message_reply", text]);
+      return { ok: true };
+    }
+  };
+  const emailApproval = await executeApprovedAction({ action: { type: "email_reply", payload: { subject: "Hello" } } }, testExecutors);
+  const calendarApproval = await executeApprovedAction({
+    action: { type: "calendar_event", payload: { summary: "Call", start: "2026-09-12T10:00:00.000Z", end: "2026-09-12T10:30:00.000Z" } }
+  }, testExecutors);
+  const alarmApproval = await executeApprovedAction({
+    action: { type: "alarm", payload: { summary: "Pay bill", datetime: "2026-09-14T09:00:00.000Z" } }
+  }, testExecutors);
+  const messageApproval = await executeApprovedAction({ action: { type: "message_reply", payload: { text: "Approved." } } }, testExecutors);
+  const unknown = await executeApprovedAction({ action: { type: "nope", payload: {} } }, testExecutors);
+  const executorPassed = emailApproval.ok && calendarApproval.ok && alarmApproval.ok && messageApproval.ok &&
+    executed.length === 4 &&
+    executed.some(([type]) => type === "email_reply") &&
+    executed.some(([type]) => type === "calendar_event") &&
+    executed.some(([type, payload]) => type === "alarm" && payload.reminders?.overrides?.[0]?.method === "popup") &&
+    executed.some(([type, text]) => type === "message_reply" && text === "Approved.") &&
+    unknown.ok === false && unknown.reason === "No executor for action type nope";
   const approvalPassed = parsed?.code === "a1" && rejectedForm === null && rejectedJunk === null &&
-    unknown.ok === false && APPROVAL_CODE.test("A12") && !APPROVAL_CODE.test("A123") && !APPROVAL_CODE.test("");
+    executorPassed && APPROVAL_CODE.test("A12") && !APPROVAL_CODE.test("A123") && !APPROVAL_CODE.test("");
   console.log(`${approvalPassed ? "PASS" : "FAIL"} approval endpoint guards`);
+  console.log(`${executorPassed ? "PASS" : "FAIL"} approval action executors`);
 
-  if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !falseSuccessPassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed) {
+  const sampleNow = Date.parse("2026-09-12T12:00:00.000Z");
+  const sampleLog = [
+    clearMarker("low", 4, "state/archive/old.json"),
+    { id: "old", tier: "high", channel: "sms", source: "gmail", category: "general", reason: "Two days old.", recordedAt: "2026-09-10T12:00:00.000Z" },
+    { id: "c1", tier: "critical", channel: "call", source: "gmail", category: "deadline", reason: "Final deadline for the submission is today.", recordedAt: "2026-09-12T09:00:00.000Z" },
+    { id: "f1", tier: "low", channel: "log", source: "gmail", category: "financial", reason: "SECRET BANK SENDER", redactedText: "SECRET BODY", recordedAt: "2026-09-12T10:00:00.000Z" },
+    { id: "k1", tier: "high", channel: "sms", source: "calendar", category: "schedule", reason: "Investor call moved to 2:30pm.", recordedAt: "2026-09-12T11:00:00.000Z" },
+    { id: "l1", tier: "low", channel: "log", source: "discord", category: "general", reason: "Routine digest.", recordedAt: "2026-09-12T11:30:00.000Z" }
+  ];
+  const samplePending = { A1: { code: "A1", action: { type: "email_reply", summary: "Confirm the repo link" }, expiresAt: "2026-09-12T12:30:00.000Z" } };
+  const digest = buildSummaryFrom(sampleLog, samplePending, sampleNow);
+  const digestWords = digest.text.split(/\s+/).length;
+  const lowClear = partitionLog(sampleLog, "low");
+  const allClear = partitionLog(sampleLog, "all");
+  const summaryPassed = digest.counts.handled === 4 && digest.counts.withheld === 1 && digest.counts.awaitingApproval === 1 && digest.counts.dueToday === 1 &&
+    digestWords <= MAX_SUMMARY_WORDS && !digest.text.includes("SECRET") && digest.text.includes("Confirm the repo link") && digest.text.includes("Investor call") &&
+    !digest.text.includes("Two days old") && buildSummaryFrom([], {}, sampleNow).text.includes("not recorded any events") &&
+    lowClear.removed === 2 && lowClear.kept.length === 4 && isMarker(lowClear.kept[0]) &&
+    allClear.removed === 5 && allClear.kept.length === 1 && isMarker(allClear.kept[0]) &&
+    fitWords([{ priority: 0, text: "a b" }, { priority: 4, text: "c d e f" }, { priority: 1, text: "g" }], 4) === "a b g";
+  console.log(`${summaryPassed ? "PASS" : "FAIL"} log clearing and daily summary`);
+
+  if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !falseSuccessPassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed || !summaryPassed) {
     process.exitCode = 1;
   }
 }
