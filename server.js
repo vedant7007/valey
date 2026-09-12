@@ -50,6 +50,12 @@ const SUMMARY_STOP_WORDS = new Set([
   "have", "in", "is", "it", "of", "on", "or", "please", "soon", "the", "this",
   "to", "was", "were", "with"
 ]);
+const SUMMARY_TIER_PRIORITY = {
+  critical: 0,
+  high: 1,
+  normal: 2,
+  low: 3
+};
 
 function twiml(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${body}</Response>`;
@@ -861,7 +867,7 @@ function buildSummaryFrom(rawLog, pendingMap, now = Date.now()) {
     dueToday: dueToday.length
   };
   const attention = groupSummaryItems(spoken.filter((entry) => entry.tier === "critical" || entry.tier === "high"));
-  const upcoming = groupSummaryItems(dueToday);
+  const upcoming = groupSummaryItems(dueToday).filter((group) => !attention.some((item) => similarSummaryKey(item.key, group.key)));
   const sentences = [];
 
   if (!recent.length) {
@@ -896,7 +902,7 @@ function buildSummaryFrom(rawLog, pendingMap, now = Date.now()) {
 function groupSummaryItems(entries) {
   const groups = [];
 
-  for (const entry of entries.slice().reverse()) {
+  for (const entry of sortSummaryEntries(entries)) {
     const phrase = briefReason(entry.reason);
 
     if (!phrase) {
@@ -915,6 +921,18 @@ function groupSummaryItems(entries) {
   }
 
   return groups;
+}
+
+function sortSummaryEntries(entries) {
+  return entries.slice().sort((left, right) => {
+    const tier = (SUMMARY_TIER_PRIORITY[left.tier] ?? 9) - (SUMMARY_TIER_PRIORITY[right.tier] ?? 9);
+
+    if (tier !== 0) {
+      return tier;
+    }
+
+    return Date.parse(right.recordedAt) - Date.parse(left.recordedAt);
+  });
 }
 
 function briefReason(reason) {
@@ -975,7 +993,7 @@ function actionBriefing(groups) {
     return `${phrase} ${main.count > 1 ? "and is the main thing" : "and is the only thing"} that needs action.`;
   }
 
-  return `${phrase} needs action first. ${groups.length === 2 ? groups[1].phrase : "There are other action items too."}`;
+  return `${phrase} needs action first. ${groups.length === 2 ? `${groups[1].phrase} also needs attention.` : "There are other action items too."}`;
 }
 
 function upcomingBriefing(groups) {
@@ -1320,17 +1338,13 @@ async function runSelfTest() {
   const duplicateDigest = buildSummaryFrom(duplicateLog, {}, sampleNow);
   const billMentions = duplicateDigest.text.match(/electricity bill/gi)?.length || 0;
   const summaryPassed = digest.counts.handled === 4 && digest.counts.withheld === 1 && digest.counts.awaitingApproval === 1 && digest.counts.dueToday === 1 &&
-    digestWords <= MAX_SUMMARY_WORDS && !digest.text.includes("SECRET") && !digest.text.includes("Confirm the repo link") && digest.text.includes("Investor call") &&
+    digestWords <= MAX_SUMMARY_WORDS && !digest.text.includes("SECRET") && !digest.text.includes("Confirm the repo link") && /investor call/i.test(digest.text) &&
     !digest.text.includes("Two days old") && !digest.text.includes("and 1 more") && !digest.text.includes("...") &&
     buildSummaryFrom([], {}, sampleNow).text.includes("not recorded anything") &&
     billMentions === 1 && !/rate limit|downgraded|fallback|classifier/i.test(duplicateDigest.text) && wordCount(duplicateDigest.text) <= MAX_SUMMARY_WORDS &&
     lowClear.removed === 2 && lowClear.kept.length === 4 && isMarker(lowClear.kept[0]) &&
     allClear.removed === 5 && allClear.kept.length === 1 && isMarker(allClear.kept[0]);
   console.log(`${summaryPassed ? "PASS" : "FAIL"} log clearing and daily summary`);
-  if (!summaryPassed) {
-    console.log(`Digest: ${digest.text}`);
-    console.log(`Duplicate digest: ${duplicateDigest.text}`);
-  }
   console.log(`${billMentions === 1 ? "PASS" : "FAIL"} summary deduplicates reminders`);
 
   if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !falseSuccessPassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed || !summaryPassed) {
