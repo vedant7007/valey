@@ -4,6 +4,7 @@ import { subscribe } from "./core/bus.js";
 import { decide } from "./core/decide.js";
 import { createPendingApproval, consumePendingApproval, expirePendingApprovals } from "./core/approvals.js";
 import { recordResponse } from "./core/memory.js";
+import { isFinancial } from "./core/redact.js";
 import { createEvent } from "./adapters/out/calendar.js";
 import { createDraft } from "./adapters/out/email.js";
 import { placeCall } from "./adapters/out/call.js";
@@ -64,12 +65,29 @@ export async function handleEvent(event) {
 }
 
 export async function dispatchDecision(event, decision) {
+  decision = enforceFinancialSafety(event, decision);
+
   if (decision.proposedAction && decision.requiresApproval) {
     const approval = await createPendingApproval(decision);
     return dispatchApprovalRequest(event, decision, approval);
   }
 
   return dispatchNotification(decision);
+}
+
+export function enforceFinancialSafety(event, decision) {
+  if (!isFinancial(event.text)) {
+    return decision;
+  }
+
+  return {
+    ...decision,
+    tier: "low",
+    channel: "log",
+    reason: "Sensitive financial, OTP, or security content was withheld and logged only.",
+    proposedAction: null,
+    requiresApproval: false
+  };
 }
 
 async function dispatchApprovalRequest(event, decision, approval) {
@@ -264,9 +282,41 @@ async function runSelfTest() {
   }
 }
 
+function runSafetySelfTest() {
+  const event = {
+    id: "gmail:otp-test",
+    text: "Your OTP is 123456 for payment approval."
+  };
+  const unsafeDecision = {
+    eventId: event.id,
+    tier: "critical",
+    reason: "This would normally call.",
+    channel: "call",
+    proposedAction: {
+      type: "message_reply",
+      summary: "Reply with the code.",
+      payload: {}
+    },
+    requiresApproval: true
+  };
+  const safeDecision = enforceFinancialSafety(event, unsafeDecision);
+  const passed = safeDecision.channel === "log" && safeDecision.proposedAction === null && safeDecision.requiresApproval === false;
+
+  console.log(`${passed ? "PASS" : "FAIL"} otp dispatch safety`);
+
+  if (!passed) {
+    process.exitCode = 1;
+  }
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.env.VALEY_SELF_TEST === "approval") {
     await runSelfTest();
+    process.exit(process.exitCode || 0);
+  }
+
+  if (process.env.VALEY_SELF_TEST === "safety") {
+    runSafetySelfTest();
     process.exit(process.exitCode || 0);
   }
 
