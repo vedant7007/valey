@@ -27,6 +27,7 @@ export async function recordDecision(event, decision) {
 
   log.push(entry);
   await writeDecisionLog(log.slice(-MAX_ENTRIES));
+  decision.memoryId = entry.id;
   return entry;
 }
 
