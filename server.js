@@ -1,5 +1,7 @@
 import "dotenv/config";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { appendCallTurn, getActiveCall } from "./core/active-calls.js";
@@ -7,6 +9,21 @@ import { appendCallTurn, getActiveCall } from "./core/active-calls.js";
 const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_BRIEFING = "Valey found an urgent item that needs your attention.";
 const STOP_PATTERN = /\b(stop|goodbye)\b/i;
+const PUBLIC_DIR = fileURLToPath(new URL("./public/", import.meta.url));
+const STATE_DIR = path.resolve(process.env.VALEY_STATE_DIR || "state");
+const MAX_DASHBOARD_DECISIONS = 50;
+const STATIC_FILES = {
+  "/": ["index.html", "text/html; charset=utf-8"],
+  "/app.css": ["app.css", "text/css; charset=utf-8"],
+  "/app.js": ["app.js", "text/javascript; charset=utf-8"]
+};
+const ADAPTER_ENV = {
+  gmail: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+  calendar: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+  telegram: ["TELEGRAM_BOT_TOKEN"],
+  discord: ["DISCORD_BOT_TOKEN"],
+  twilio: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"]
+};
 
 function twiml(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${body}</Response>`;
@@ -126,9 +143,104 @@ function escapeXml(text) {
     .replace(/'/g, "&apos;");
 }
 
+async function handleStatic(response, [fileName, contentType]) {
+  try {
+    const body = await readFile(path.join(PUBLIC_DIR, fileName));
+    response.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
+    response.end(body);
+  } catch (error) {
+    console.error(`Static file failed: ${error.message}`);
+    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Not found.");
+  }
+}
+
+async function handleState(response) {
+  let state;
+
+  try {
+    state = await buildDashboardState();
+  } catch (error) {
+    console.error(`State handler failed: ${error.message}`);
+    state = summarize([], {});
+  }
+
+  response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(JSON.stringify(state));
+}
+
+async function buildDashboardState() {
+  const log = await readStateJson("decisions.json", []);
+  const pending = await readStateJson("pending.json", {});
+  return summarize(log, pending);
+}
+
+function summarize(rawLog, pendingMap) {
+  const now = Date.now();
+  const log = rawLog.filter((entry) => entry && typeof entry === "object");
+  const count = (predicate) => log.filter(predicate).length;
+  const pending = Object.values(pendingMap)
+    .filter((item) => item && Date.parse(item.expiresAt) > now)
+    .map((item) => ({ ...item, action: { type: item.action?.type, summary: item.action?.summary } }));
+
+  return {
+    decisions: log.slice(-MAX_DASHBOARD_DECISIONS).reverse().map(publicDecision),
+    pending,
+    stats: {
+      total: log.length,
+      critical: count((entry) => entry.tier === "critical"),
+      high: count((entry) => entry.tier === "high"),
+      normal: count((entry) => entry.tier === "normal"),
+      low: count((entry) => entry.tier === "low"),
+      withheld: count((entry) => entry.category === "financial"),
+      callsPlaced: count((entry) => entry.channel === "call"),
+      smsSent: count((entry) => entry.channel === "sms"),
+      voiceNotes: count((entry) => entry.channel === "voice"),
+      logged: count((entry) => entry.channel === "log"),
+      approvalsPending: pending.length,
+      approvalsExecuted: count((entry) => entry.response === "approved"),
+      bySource: {
+        gmail: count((entry) => entry.source === "gmail"),
+        telegram: count((entry) => entry.source === "telegram"),
+        discord: count((entry) => entry.source === "discord"),
+        calendar: count((entry) => entry.source === "calendar")
+      }
+    },
+    adapters: Object.entries(ADAPTER_ENV).map(([name, names]) => ({
+      name,
+      active: names.every((envName) => Boolean(process.env[envName]))
+    }))
+  };
+}
+
+// Withheld entries never leave the server with any text attached, redacted or not.
+function publicDecision(entry) {
+  return entry?.category === "financial" ? { ...entry, redactedText: undefined } : entry;
+}
+
+async function readStateJson(fileName, fallback) {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(STATE_DIR, fileName), "utf8"));
+    const shapeMatches = parsed && typeof parsed === "object" && Array.isArray(parsed) === Array.isArray(fallback);
+    return shapeMatches ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function createServer() {
   return http.createServer(async (request, response) => {
     const query = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+
+    if (request.method === "GET" && STATIC_FILES[query.pathname]) {
+      await handleStatic(response, STATIC_FILES[query.pathname]);
+      return;
+    }
+
+    if (request.method === "GET" && query.pathname === "/api/state") {
+      await handleState(response);
+      return;
+    }
 
     if (request.method === "POST" && query.pathname === "/voice") {
       await handleVoice(request, response, query);
@@ -156,7 +268,16 @@ async function runSelfTest() {
   console.log(briefing);
   console.log(`${passed ? "PASS" : "FAIL"} voice server twiml`);
 
-  if (!passed) {
+  const state = summarize(
+    [{ tier: "critical", channel: "call", source: "gmail", category: "financial", redactedText: "secret", response: "approved" }, null],
+    { A1: { code: "A1", action: { type: "email_reply", summary: "Reply", payload: { to: "x" } }, expiresAt: new Date(Date.now() + 60000).toISOString() }, A2: { code: "A2", expiresAt: "2000-01-01T00:00:00.000Z" } }
+  );
+  const statePassed = state.stats.total === 1 && state.stats.withheld === 1 && state.stats.approvalsExecuted === 1 &&
+    state.pending.length === 1 && state.pending[0].action.payload === undefined &&
+    state.decisions[0].redactedText === undefined && Array.isArray(summarize([], {}).decisions);
+  console.log(`${statePassed ? "PASS" : "FAIL"} dashboard state`);
+
+  if (!passed || !statePassed) {
     process.exitCode = 1;
   }
 }

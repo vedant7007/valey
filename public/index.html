@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0B0C0E">
+  <title>Valey</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="dot" id="status-dot" aria-hidden="true"></span>
+      <h1 class="wordmark">Valey</h1>
+    </div>
+    <p class="adapters" id="adapters" aria-live="polite">
+      <span class="num" data-adapters>&ndash;</span> <span data-adapters-label>adapters active</span>
+    </p>
+  </header>
+
+  <main>
+    <section class="stats" aria-label="Summary">
+      <article class="stat">
+        <span class="stat-value num" data-stat="total">&ndash;</span>
+        <span class="stat-label">Events handled</span>
+      </article>
+      <article class="stat">
+        <span class="stat-value num" data-stat="callsPlaced">&ndash;</span>
+        <span class="stat-label">Calls placed</span>
+      </article>
+      <article class="stat">
+        <span class="stat-value num" data-stat="withheld">&ndash;</span>
+        <span class="stat-label">Withheld</span>
+      </article>
+      <article class="stat">
+        <span class="stat-value num" data-stat="approvalsPending">&ndash;</span>
+        <span class="stat-label">Awaiting approval</span>
+      </article>
+    </section>
+
+    <section class="panel" aria-labelledby="tiers-title">
+      <h2 class="section-title" id="tiers-title">Urgency tiers</h2>
+      <div class="tier-bar" id="tier-bar" role="img" aria-label="No events yet">
+        <span class="seg critical" data-tier="critical"></span>
+        <span class="seg high" data-tier="high"></span>
+        <span class="seg normal" data-tier="normal"></span>
+        <span class="seg low" data-tier="low"></span>
+      </div>
+      <ul class="legend">
+        <li><span class="swatch critical"></span>Critical <span class="num" data-legend="critical">0</span></li>
+        <li><span class="swatch high"></span>High <span class="num" data-legend="high">0</span></li>
+        <li><span class="swatch normal"></span>Normal <span class="num" data-legend="normal">0</span></li>
+        <li><span class="swatch low"></span>Low <span class="num" data-legend="low">0</span></li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="pending-title">
+      <h2 class="section-title" id="pending-title">Awaiting approval <span class="count num" id="pending-count"></span></h2>
+      <div class="list" id="pending">
+        <p class="empty">Nothing awaiting your approval.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="feed-title">
+      <h2 class="section-title" id="feed-title">Activity <span class="count num" id="feed-count"></span></h2>
+      <div class="list" id="feed">
+        <p class="empty">No decisions recorded yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <template id="lock-icon">
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="7" width="10" height="7" rx="1.5"></rect>
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"></path>
+    </svg>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>
