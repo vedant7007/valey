@@ -36,7 +36,20 @@ const ADAPTER_ENV = {
 const TIMELINE_LENGTH = 20;
 const CLEAR_SCOPES = new Set(["all", "low"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_SUMMARY_WORDS = 120;
+const MAX_SUMMARY_WORDS = 100;
+const INTERNAL_REASON_PATTERNS = [
+  /\bcall rate limit reached\b.*$/i,
+  /\bvaley downgraded\b.*$/i,
+  /\bclassifier (?:model )?(?:was unavailable|failed|returned invalid json)\b.*$/i,
+  /\bfallback path\b.*$/i,
+  /\bused the normal fallback\b.*$/i,
+  /\bdecision validation failed\b.*$/i
+];
+const SUMMARY_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "before", "by", "for", "from", "has",
+  "have", "in", "is", "it", "of", "on", "or", "please", "soon", "the", "this",
+  "to", "was", "were", "with"
+]);
 
 function twiml(body) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${body}</Response>`;
@@ -847,62 +860,167 @@ function buildSummaryFrom(rawLog, pendingMap, now = Date.now()) {
     awaitingApproval: pending.length,
     dueToday: dueToday.length
   };
-  const attention = spoken.filter((entry) => entry.tier === "critical" || entry.tier === "high").reverse();
+  const attention = groupSummaryItems(spoken.filter((entry) => entry.tier === "critical" || entry.tier === "high"));
+  const upcoming = groupSummaryItems(dueToday);
   const sentences = [];
-  const say = (priority, text) => sentences.push({ priority, text });
 
   if (!recent.length) {
-    say(0, "Valey has not recorded any events in the last 24 hours.");
+    sentences.push("Valey has not recorded anything in the last 24 hours.");
+  } else if (attention.length) {
+    sentences.push(actionBriefing(attention));
   } else {
-    say(0, `In the last 24 hours Valey handled ${plural(recent.length, "event")}: ${counts.critical} critical, ${counts.high} high, ${counts.normal} normal and ${counts.low} low.`);
-  }
-
-  if (attention.length) {
-    say(4, `${plural(attention.length, "item")} needed attention: ${listReasons(attention, 3)}`);
-  }
-
-  if (counts.withheld) {
-    say(1, `${plural(counts.withheld, "item")} ${counts.withheld === 1 ? "was" : "were"} withheld as financial or one-time-code material.`);
+    sentences.push("Nothing needs your attention right now.");
   }
 
   if (pending.length) {
-    say(2, `${plural(pending.length, "action")} ${pending.length === 1 ? "is" : "are"} awaiting your approval: ${listReasons(pending.map((item) => ({ reason: item.action?.summary })), 3)}`);
+    sentences.push(`${capitalize(numberWord(pending.length))} ${pending.length === 1 ? "action is" : "actions are"} awaiting your approval.`);
   } else if (recent.length) {
-    say(2, "Nothing is awaiting your approval.");
+    sentences.push("Nothing is awaiting your approval.");
   }
 
-  if (dueToday.length) {
-    say(3, `Due today: ${listReasons(dueToday, 2)}`);
+  if (upcoming.length) {
+    sentences.push(upcomingBriefing(upcoming));
   }
 
-  return { text: fitWords(sentences, MAX_SUMMARY_WORDS), generatedAt: new Date(now).toISOString(), counts };
-}
-
-function listReasons(entries, limit) {
-  const items = entries
-    .map((entry) => String(entry.reason || "").replace(/\s+/g, " ").trim().replace(/[.;]+$/, ""))
-    .filter(Boolean)
-    .slice(0, limit)
-    .map((reason) => reason.length > 90 ? `${reason.slice(0, 87).trimEnd()}...` : reason);
-  const more = entries.length - items.length;
-  return `${items.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`;
-}
-
-function plural(count, noun) {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
-// Drops the least important sentence until the digest fits, keeping reading order; the headline always stays.
-function fitWords(sentences, limit) {
-  const kept = sentences.slice();
-  const words = () => kept.map((item) => item.text).join(" ").split(/\s+/).length;
-
-  while (kept.length > 1 && words() > limit) {
-    const lowest = kept.reduce((worst, item, index) => (item.priority > kept[worst].priority ? index : worst), 0);
-    kept.splice(lowest, 1);
+  if (counts.withheld) {
+    sentences.push(`${capitalize(numberWord(counts.withheld))} ${counts.withheld === 1 ? "item was" : "items were"} withheld as financial or one-time-code material.`);
   }
 
-  return kept.map((item) => item.text).join(" ");
+  if (recent.length) {
+    sentences.push(countsBriefing(counts));
+  }
+
+  return { text: enforceWordLimit(sentences, MAX_SUMMARY_WORDS), generatedAt: new Date(now).toISOString(), counts };
+}
+
+function groupSummaryItems(entries) {
+  const groups = [];
+
+  for (const entry of entries.slice().reverse()) {
+    const phrase = briefReason(entry.reason);
+
+    if (!phrase) {
+      continue;
+    }
+
+    const key = summaryKey(phrase);
+    const existing = groups.find((group) => similarSummaryKey(group.key, key));
+
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+
+    groups.push({ phrase, key, count: 1 });
+  }
+
+  return groups;
+}
+
+function briefReason(reason) {
+  let text = String(reason || "").replace(/\s+/g, " ").trim();
+
+  for (const pattern of INTERNAL_REASON_PATTERNS) {
+    text = text.replace(pattern, "").trim();
+  }
+
+  text = firstClause(text).replace(/\bValey\b\s*/gi, "").replace(/[.,;:\s]+$/g, "").trim();
+
+  if (!text) {
+    return "";
+  }
+
+  return text
+    .replace(/^electricity bill payment is due\b/i, "Your electricity bill is due")
+    .replace(/^electricity bill is due\b/i, "Your electricity bill is due")
+    .replace(/^final deadline\b/i, "The final deadline")
+    .replace(/^investor call\b/i, "The investor call");
+}
+
+function firstClause(text) {
+  const match = String(text || "").match(/^.*?(?:(?:\.\s)|(?:;\s)|(?::\s)|$)/);
+  return (match?.[0] || text).replace(/[.;:]+$/g, "");
+}
+
+function summaryKey(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word && !SUMMARY_STOP_WORDS.has(word))
+    .join(" ");
+}
+
+function similarSummaryKey(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  if (left === right || left.includes(right) || right.includes(left)) {
+    return true;
+  }
+
+  const leftWords = new Set(left.split(" "));
+  const rightWords = new Set(right.split(" "));
+  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
+  const smaller = Math.min(leftWords.size, rightWords.size);
+  return smaller > 0 && overlap / smaller >= 0.75;
+}
+
+function actionBriefing(groups) {
+  const main = groups[0];
+  const phrase = main.count > 1 ? `${main.phrase}, repeated ${numberWord(main.count)} times` : main.phrase;
+
+  if (groups.length === 1) {
+    return `${phrase} ${main.count > 1 ? "and is the main thing" : "and is the only thing"} that needs action.`;
+  }
+
+  return `${phrase} needs action first. ${groups.length === 2 ? groups[1].phrase : "There are other action items too."}`;
+}
+
+function upcomingBriefing(groups) {
+  const main = groups[0];
+  return `${main.phrase} is coming up.`;
+}
+
+function countsBriefing(counts) {
+  const dominant = dominantTier(counts);
+  const tail = dominant ? `, most of them ${dominant} priority` : "";
+  return `Valey handled ${counts.handled} ${counts.handled === 1 ? "event" : "events"} in the last 24 hours${tail}.`;
+}
+
+function dominantTier(counts) {
+  const tiers = [
+    ["critical", counts.critical],
+    ["high", counts.high],
+    ["normal", counts.normal],
+    ["low", counts.low]
+  ];
+  const [tier, count] = tiers.reduce((best, item) => (item[1] > best[1] ? item : best), ["", 0]);
+  return count > counts.handled / 2 ? tier : "";
+}
+
+function enforceWordLimit(sentences, limit) {
+  const kept = sentences.filter(Boolean);
+
+  while (kept.length > 1 && wordCount(kept.join(" ")) > limit) {
+    kept.splice(kept.length - 2, 1);
+  }
+
+  return kept.join(" ");
+}
+
+function wordCount(text) {
+  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function numberWord(count) {
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+  return words[count] || String(count);
+}
+
+function capitalize(text) {
+  return `${String(text || "").slice(0, 1).toUpperCase()}${String(text || "").slice(1)}`;
 }
 
 async function buildDashboardState() {
@@ -1181,23 +1299,39 @@ async function runSelfTest() {
   const sampleLog = [
     clearMarker("low", 4, "state/archive/old.json"),
     { id: "old", tier: "high", channel: "sms", source: "gmail", category: "general", reason: "Two days old.", recordedAt: "2026-09-10T12:00:00.000Z" },
-    { id: "c1", tier: "critical", channel: "call", source: "gmail", category: "deadline", reason: "Final deadline for the submission is today.", recordedAt: "2026-09-12T09:00:00.000Z" },
+    { id: "c1", tier: "critical", channel: "call", source: "gmail", category: "deadline", reason: "Electricity bill payment is due Tuesday.", recordedAt: "2026-09-12T09:00:00.000Z" },
     { id: "f1", tier: "low", channel: "log", source: "gmail", category: "financial", reason: "SECRET BANK SENDER", redactedText: "SECRET BODY", recordedAt: "2026-09-12T10:00:00.000Z" },
     { id: "k1", tier: "high", channel: "sms", source: "calendar", category: "schedule", reason: "Investor call moved to 2:30pm.", recordedAt: "2026-09-12T11:00:00.000Z" },
     { id: "l1", tier: "low", channel: "log", source: "discord", category: "general", reason: "Routine digest.", recordedAt: "2026-09-12T11:30:00.000Z" }
   ];
   const samplePending = { A1: { code: "A1", action: { type: "email_reply", summary: "Confirm the repo link" }, expiresAt: "2026-09-12T12:30:00.000Z" } };
   const digest = buildSummaryFrom(sampleLog, samplePending, sampleNow);
-  const digestWords = digest.text.split(/\s+/).length;
+  const digestWords = wordCount(digest.text);
   const lowClear = partitionLog(sampleLog, "low");
   const allClear = partitionLog(sampleLog, "all");
+  const duplicateLog = [
+    { id: "d1", tier: "critical", channel: "call", source: "gmail", category: "deadline", reason: "Electricity bill payment is due soon.", recordedAt: "2026-09-12T08:00:00.000Z" },
+    { id: "d2", tier: "critical", channel: "sms", source: "gmail", category: "deadline", reason: "Electricity bill payment is due soon. Call rate limit reached, so Valey downgraded this alert to SMS.", recordedAt: "2026-09-12T08:10:00.000Z" },
+    { id: "d3", tier: "high", channel: "sms", source: "gmail", category: "deadline", reason: "Electricity bill is due soon.", recordedAt: "2026-09-12T08:20:00.000Z" },
+    { id: "d4", tier: "critical", channel: "call", source: "gmail", category: "deadline", reason: "Electricity bill payment is due soon. Call rate limit reached, so Valey downgraded this alert to SMS.", recordedAt: "2026-09-12T08:30:00.000Z" },
+    { id: "d5", tier: "critical", channel: "sms", source: "gmail", category: "deadline", reason: "Electricity bill payment is due soon. Call rate limit reached, so Valey downgraded this alert to SMS.", recordedAt: "2026-09-12T08:40:00.000Z" },
+    { id: "d6", tier: "low", channel: "log", source: "gmail", category: "financial", reason: "SECRET BANK SENDER", redactedText: "SECRET BODY", recordedAt: "2026-09-12T08:50:00.000Z" }
+  ];
+  const duplicateDigest = buildSummaryFrom(duplicateLog, {}, sampleNow);
+  const billMentions = duplicateDigest.text.match(/electricity bill/gi)?.length || 0;
   const summaryPassed = digest.counts.handled === 4 && digest.counts.withheld === 1 && digest.counts.awaitingApproval === 1 && digest.counts.dueToday === 1 &&
-    digestWords <= MAX_SUMMARY_WORDS && !digest.text.includes("SECRET") && digest.text.includes("Confirm the repo link") && digest.text.includes("Investor call") &&
-    !digest.text.includes("Two days old") && buildSummaryFrom([], {}, sampleNow).text.includes("not recorded any events") &&
+    digestWords <= MAX_SUMMARY_WORDS && !digest.text.includes("SECRET") && !digest.text.includes("Confirm the repo link") && digest.text.includes("Investor call") &&
+    !digest.text.includes("Two days old") && !digest.text.includes("and 1 more") && !digest.text.includes("...") &&
+    buildSummaryFrom([], {}, sampleNow).text.includes("not recorded anything") &&
+    billMentions === 1 && !/rate limit|downgraded|fallback|classifier/i.test(duplicateDigest.text) && wordCount(duplicateDigest.text) <= MAX_SUMMARY_WORDS &&
     lowClear.removed === 2 && lowClear.kept.length === 4 && isMarker(lowClear.kept[0]) &&
-    allClear.removed === 5 && allClear.kept.length === 1 && isMarker(allClear.kept[0]) &&
-    fitWords([{ priority: 0, text: "a b" }, { priority: 4, text: "c d e f" }, { priority: 1, text: "g" }], 4) === "a b g";
+    allClear.removed === 5 && allClear.kept.length === 1 && isMarker(allClear.kept[0]);
   console.log(`${summaryPassed ? "PASS" : "FAIL"} log clearing and daily summary`);
+  if (!summaryPassed) {
+    console.log(`Digest: ${digest.text}`);
+    console.log(`Duplicate digest: ${duplicateDigest.text}`);
+  }
+  console.log(`${billMentions === 1 ? "PASS" : "FAIL"} summary deduplicates reminders`);
 
   if (!passed || !endIntentPassed || !capPassed || !callApprovalPassed || !actionParsePassed || !falseSuccessPassed || !spokenSafetyPassed || !modelInputSafetyPassed || !statePassed || !timelinePassed || !approvalPassed || !summaryPassed) {
     process.exitCode = 1;
